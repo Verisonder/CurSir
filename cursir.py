@@ -27,8 +27,8 @@ import platform
 import subprocess
 import webbrowser
 
-from PySide6.QtCore import (Qt, QObject, Signal, QTimer, QPoint,
-                            QBuffer, QByteArray, QIODevice)
+from PySide6.QtCore import (Qt, QObject, Signal, QTimer, QPoint, QRectF,
+                            QPointF, QBuffer, QByteArray, QIODevice)
 from PySide6.QtGui import (QGuiApplication, QCursor, QColor, QPainter, QPen,
                            QFont, QIcon, QPixmap, QAction, QPolygon)
 from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.3.8"
+VERSION = "0.3.9"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -768,6 +768,55 @@ class Glow(QWidget):
         p.end()
 
 
+class Spinner(QWidget):
+    """A small rotating sci-fi 'thinking' indicator (concentric arcs)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(340, 60)
+        self._ang = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self):
+        if not self._timer.isActive():
+            self._timer.start(16)      # ~60 fps
+        self.show()
+
+    def stop(self):
+        self._timer.stop()
+        self.hide()
+
+    def _tick(self):
+        self._ang = (self._ang + 3.2) % 360
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        cx, cy = self.width() / 2, self.height() / 2
+        a = self._ang
+        # concentric arcs spinning at different speeds/directions
+        for r, start, span, w, alpha in (
+                (24, a, 110, 3, 255),
+                (24, a + 180, 110, 3, 255),
+                (17, -a * 1.7, 80, 2, 200),
+                (11, a * 2.4, 200, 2, 130)):
+            col = QColor(ACCENT)
+            col.setAlpha(alpha)
+            p.setPen(QPen(col, w))
+            rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+            p.drawArc(rect, int(start * 16), int(span * 16))
+        # pulsing core
+        pr = 3.0 + 1.8 * (1 + math.sin(math.radians(a * 3))) / 2
+        core = QColor(ACCENT)
+        core.setAlpha(235)
+        p.setBrush(core)
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QPointF(cx, cy), pr, pr)
+        p.end()
+
+
 class Box(QWidget):
     submitted = Signal(str)
     confirmed = Signal()
@@ -794,8 +843,11 @@ class Box(QWidget):
         self.status.setWordWrap(True)
         self.status.setMinimumWidth(340)
         self.status.hide()
+        self.spinner = Spinner()
+        self.spinner.hide()
         lay.addWidget(self.edit)
         lay.addWidget(self.status)
+        lay.addWidget(self.spinner, 0, Qt.AlignCenter)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -813,6 +865,7 @@ class Box(QWidget):
 
     def ask_at(self, gx, gy):
         self._mode = "ask"
+        self.spinner.stop()
         self.edit.show()
         self.edit.clear()
         self.status.setText("")
@@ -848,6 +901,7 @@ class Box(QWidget):
     def step_at(self, gx, gy, text, typing=False, preview="", auto=False,
                 launch=False):
         self._mode = "step"
+        self.spinner.stop()
         self.edit.hide()
         if auto:
             tail = "Acting automatically…   Esc to cancel"
@@ -871,9 +925,19 @@ class Box(QWidget):
         self._force_foreground()
         self.setFocus()
 
-    def thinking(self, text="One moment, sir…"):
+    def thinking(self, text=None):
         self._mode = "wait"
         self.edit.hide()
+        self.status.hide()
+        self.spinner.start()          # rotating sci-fi indicator, no words
+        self.adjustSize()
+        self.show()
+        self.raise_()
+
+    def message(self, text):
+        self._mode = "wait"
+        self.edit.hide()
+        self.spinner.stop()
         self.status.setText(text)
         self.status.show()
         self.adjustSize()
@@ -1526,7 +1590,7 @@ class CurSir(QObject):
     def _run_step(self, first):
         self._acting = False
         if not self.cfg.get("gemini_key"):
-            self.box.thinking("No API key set, sir — kindly add one in Settings.")
+            self.box.message("No API key set, sir — kindly add one in Settings.")
             return
         self.busy = True
         think, do_zoom, ground, shot_w = QUALITY.get(
@@ -1537,10 +1601,10 @@ class CurSir(QObject):
         shot, geom, img = self._grab(shot_w)
         self._geom = geom
         if not shot:
-            self.box.thinking("I'm unable to view the screen, sir.")
+            self.box.message("I'm unable to view the screen, sir.")
             self.busy = False
             return
-        self.box.thinking("One moment, sir…" if first else "Allow me a moment, sir…")
+        self.box.thinking()   # rotating spinner while it works
         # screenshot is taken — bring the glow back so it keeps pulsing on the
         # cursor while CurSir thinks, instead of going dark
         pos = QCursor.pos()
@@ -1552,12 +1616,12 @@ class CurSir(QObject):
     def _on_vision(self, res):
         self.busy = False
         if not res or not isinstance(res, dict):
-            self.box.thinking("My apologies, sir — I received no reply. Shall we try again?")
+            self.box.message("My apologies, sir — I received no reply. Shall we try again?")
             return
         say = str(res.get("say", "")).strip() or "As you wish, sir."
         if res.get("done"):
             self.glow.stop()
-            self.box.thinking(say)
+            self.box.message(say)
             QTimer.singleShot(2200, self._cancel)
             return
         # launch-app step: open an app directly, no icon to click
@@ -1578,12 +1642,12 @@ class CurSir(QObject):
             return
         if not res.get("found") or not res.get("box"):
             self.glow.stop()
-            self.box.thinking(say)
+            self.box.message(say)
             return
         try:
             top, left, bottom, right = [float(v) for v in res["box"][:4]]
         except Exception:
-            self.box.thinking("I couldn't place that precisely, sir. Might you rephrase?")
+            self.box.message("I couldn't place that precisely, sir. Might you rephrase?")
             return
         # prefer the zoom-refined centre when the second pass produced one
         if isinstance(res.get("_center"), (list, tuple)) \
@@ -1632,10 +1696,9 @@ class CurSir(QObject):
         if not self.target:
             return
         self._acting = True
-        # drop our own window focus + overlays FIRST, so the action lands on
-        # the target instead of just activating our box
+        # hide only OUR box so the action lands on the target; keep the glow
+        # alive so the effect stays continuous across the whole task
         self.box.hide()
-        self.glow.stop()
         QApplication.processEvents()
         if getattr(self, "_pending_type", ""):
             QTimer.singleShot(70, self._do_paste)
@@ -1676,7 +1739,7 @@ class CurSir(QObject):
         self.done_list.append(f"launched {name}")
         if self._last:
             self.glow.stop()
-            self.box.thinking("Very good, sir.")
+            self.box.message("Very good, sir.")
             QTimer.singleShot(1600, self._cancel)
             return
         # give the app a moment to open before the next screenshot
@@ -1691,7 +1754,7 @@ class CurSir(QObject):
         self.done_list.append(self._last_label)
         if self._last:
             self.glow.stop()
-            self.box.thinking("Very good, sir.")
+            self.box.message("Very good, sir.")
             QTimer.singleShot(1600, self._cancel)
             return
         QTimer.singleShot(700, lambda: self._run_step(first=False))
@@ -1724,7 +1787,7 @@ class CurSir(QObject):
         self._pending_type = ""
         if self._last:
             self.glow.stop()
-            self.box.thinking("Very good, sir.")
+            self.box.message("Very good, sir.")
             QTimer.singleShot(1600, self._cancel)
             return
         # a submitted search/URL triggers a page load — give it time before
@@ -1737,6 +1800,7 @@ class CurSir(QObject):
         self._acting = False
         self.target = None
         self.glow.stop()
+        self.box.spinner.stop()
         self.box.hide()
 
     # -- os helpers ---------------------------------------------------------
