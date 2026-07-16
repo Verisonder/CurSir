@@ -34,10 +34,10 @@ from PySide6.QtGui import (QGuiApplication, QCursor, QColor, QPainter, QPen,
 from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QVBoxLayout, QHBoxLayout, QFormLayout,
                                QComboBox, QCheckBox, QPushButton,
-                               QSystemTrayIcon, QMenu)
+                               QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -794,6 +794,18 @@ class Settings(QWidget):
         self.install_btn.setMinimumHeight(30)
         self.install_btn.clicked.connect(self._install)
         self.install_btn.hide()
+        # green install progress bar (hidden until installing)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(16)
+        self.progress.setStyleSheet(
+            "QProgressBar { border:1px solid #30363d; border-radius:8px; "
+            "background:#161b22; } "
+            "QProgressBar::chunk { background-color:#2ea043; "
+            "border-radius:7px; }")
+        self.progress.hide()
 
         self.check_btn = QPushButton("Check for updates")
         self.check_btn.clicked.connect(self._check)
@@ -820,6 +832,7 @@ class Settings(QWidget):
         lay.addLayout(form)
         lay.addWidget(self.upd_status)
         lay.addWidget(self.install_btn)
+        lay.addWidget(self.progress)
         lay.addLayout(row)
 
         # mark the form dirty (enable Save) whenever the user edits anything
@@ -896,6 +909,19 @@ class Settings(QWidget):
 
     def set_install_status(self, text):
         self.upd_status.setText(text)
+
+    def begin_install(self):
+        self.install_btn.hide()
+        self.progress.setValue(0)
+        self.progress.show()
+        self.upd_status.setText("Installing…")
+
+    def set_progress(self, v):
+        self.progress.setValue(max(0, min(100, int(v))))
+
+    def end_install(self, ok):
+        if not ok:
+            self.progress.hide()
 
     def _shortcut(self):
         ok = create_desktop_shortcut()
@@ -1058,7 +1084,13 @@ class CurSir(QObject):
             return
         self._updating = True
         self.tray.showMessage("CurSir", f"Installing v{latest}, sir…")
-        self.settings.set_install_status(f"Installing v{latest}, sir…")
+        self.settings.begin_install()
+        # smooth progress up to ~90% while the (fast) download/write happens;
+        # jumps to 100% the moment it's actually done
+        self._prog = 0
+        self._prog_timer = QTimer(self)
+        self._prog_timer.timeout.connect(self._tick_progress)
+        self._prog_timer.start(40)
         import threading
 
         def work():
@@ -1070,16 +1102,27 @@ class CurSir(QObject):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _tick_progress(self):
+        if self._prog < 90:
+            self._prog += 3
+            self.settings.set_progress(self._prog)
+
     def _after_update(self, ok, latest):
+        try:
+            self._prog_timer.stop()
+        except Exception:
+            pass
         if ok:
+            self.settings.set_progress(100)
             self.tray.showMessage("CurSir", "Update installed — restarting…")
             self.settings.set_install_status("Installed — restarting CurSir…")
-            # give the message a beat, then exit so the swap can complete
+            # let the full bar show for a beat, then exit so the swap completes
             QTimer.singleShot(1100, lambda: (restart_app()
                                              if not getattr(sys, "frozen", False)
                                              else os._exit(0)))
         else:
             self._updating = False
+            self.settings.end_install(False)
             self.settings.set_install_status(
                 "Update failed, sir — opening the download page.")
             self.tray.showMessage(
