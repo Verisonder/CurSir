@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.3.5"
+VERSION = "0.3.6"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -185,6 +185,35 @@ BROWSER_NAMES = {"chrome", "google chrome", "msedge", "edge",
                  "web browser", "internet", "vivaldi"}
 BROWSER_MAP = {"chrome": "chrome", "edge": "msedge", "firefox": "firefox",
                "brave": "brave", "opera": "opera", "vivaldi": "vivaldi"}
+
+
+def installed_apps():
+    """Apps the user actually has, from Start Menu shortcuts.
+    Returns {app name: shortcut path}."""
+    apps = {}
+    if platform.system() != "Windows":
+        return apps
+    import glob
+    roots = [
+        os.path.join(os.environ.get("ProgramData", ""),
+                     r"Microsoft\Windows\Start Menu\Programs"),
+        os.path.join(os.environ.get("APPDATA", ""),
+                     r"Microsoft\Windows\Start Menu\Programs"),
+    ]
+    skip = ("uninstall", "readme", "read me", "help", "documentation",
+            "license", "website", "home page", "release notes", "changelog",
+            "report a", "manual", "eula", "on the web", "setup")
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for path in glob.glob(os.path.join(root, "**", "*.lnk"),
+                              recursive=True):
+            name = os.path.splitext(os.path.basename(path))[0].strip()
+            low = name.lower()
+            if not name or any(s in low for s in skip):
+                continue
+            apps.setdefault(name, path)
+    return apps
 
 
 def installed_browsers():
@@ -471,7 +500,7 @@ def gemini_call_json(key, contents, persona, think, ground, max_tokens=400):
     return {}
 
 
-def gemini_locate(key, task, done_list, shot_b64, think, ground):
+def gemini_locate(key, task, done_list, shot_b64, think, ground, apps=None):
     """First pass: locate the next UI element in the full screenshot."""
     step_no = len(done_list) + 1
     done_txt = ("Steps ALREADY completed by the user: "
@@ -534,11 +563,21 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
         "launch_app to its launch name or executable (e.g. 'chrome', "
         "'msedge', 'firefox', 'notepad', 'calc', 'explorer', 'spotify', "
         "'code', 'winword'); use Google Search to get the correct name if "
-        "unsure, and set last=true if opening it completes the task. Leave "
-        "launch_app empty for on-screen click steps.")
+        "unsure, and set last=true if opening it completes the task. When the "
+        "task implies an app by PURPOSE (e.g. 'make a video' -> a video "
+        "editor, 'edit a photo' -> an image editor, 'take notes' -> a notes "
+        "app), pick the BEST-MATCHING app from the user's installed-apps "
+        "list below and set launch_app to its EXACT name from that list. "
+        "Leave launch_app empty for on-screen click steps.")
+
+    apps_txt = ""
+    if apps:
+        apps_txt = ("\nUser's INSTALLED APPS (use the EXACT name in "
+                    "launch_app when the task needs one of these): "
+                    + ", ".join(apps[:140]))
 
     contents = [{"role": "user", "parts": [
-        {"text": f"Task: {task}\nStep number: {step_no}\n{done_txt}"},
+        {"text": f"Task: {task}\nStep number: {step_no}\n{done_txt}{apps_txt}"},
         {"inline_data": {"mime_type": "image/jpeg", "data": shot_b64}}]}]
     return gemini_call_json(key, contents, persona, think, ground)
 
@@ -910,11 +949,13 @@ class Hotkey(QObject):
 class Vision(QObject):
     done = Signal(dict)
 
-    def run(self, key, task, done_list, shot, think, ground, do_zoom, img):
+    def run(self, key, task, done_list, shot, think, ground, do_zoom, img,
+            apps=None):
         import threading
 
         def work():
-            res = gemini_locate(key, task, done_list, shot, think, ground)
+            res = gemini_locate(key, task, done_list, shot, think, ground,
+                                apps=apps)
             res = res or {}
             if DEBUG:
                 log(f"first-pass: found={res.get('found')} "
@@ -1171,6 +1212,7 @@ class CurSir(QObject):
         self._acting = False
         self._pending_launch = ""
         self._pending_type = ""
+        self._apps = None
         self._geom = None
         self._last = False
         self._last_label = "that"
@@ -1426,7 +1468,8 @@ class CurSir(QObject):
             return
         self.box.thinking("One moment, sir…" if first else "Allow me a moment, sir…")
         self.vision.run(self.cfg["gemini_key"], self.task, self.done_list,
-                        shot, think, ground, do_zoom, img)
+                        shot, think, ground, do_zoom, img,
+                        apps=list(self.app_list().keys()))
 
     def _on_vision(self, res):
         self.busy = False
@@ -1521,13 +1564,37 @@ class CurSir(QObject):
         else:
             QTimer.singleShot(70, self._do_click)
 
+    def app_list(self):
+        if self._apps is None:
+            try:
+                self._apps = installed_apps()
+            except Exception:
+                self._apps = {}
+        return self._apps
+
+    def _resolve_app(self, name):
+        apps = self.app_list()
+        low = name.lower()
+        if name in apps:
+            return apps[name]
+        for n, t in apps.items():           # case-insensitive exact
+            if n.lower() == low:
+                return t
+        for n, t in apps.items():           # loose contains
+            if low in n.lower() or n.lower() in low:
+                return t
+        return name                          # let the OS resolver try
+
     def _do_launch(self):
         name = getattr(self, "_pending_launch", "")
         self._pending_launch = ""
         if name.lower() in BROWSER_NAMES or "browser" in name.lower():
-            name = resolve_browser(self.cfg.get("browser", "system default"))
-            log(f"browser launch -> {name}")
-        launch_app(name)
+            target = resolve_browser(self.cfg.get("browser", "system default"))
+            log(f"browser launch -> {target}")
+        else:
+            target = self._resolve_app(name)
+            log(f"app launch: {name} -> {target}")
+        launch_app(target)
         self.done_list.append(f"launched {name}")
         if self._last:
             self.glow.stop()
