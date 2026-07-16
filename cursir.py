@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.2.9"
+VERSION = "0.3.0"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -166,6 +166,22 @@ def apply_source_update():
         return True
     except Exception as e:
         log(f"update FAILED: {type(e).__name__}: {e}")
+        return False
+
+
+def launch_app(name):
+    """Open an application directly (no clicking its icon). Uses the Windows
+    'start' resolver, which knows registered apps (chrome, msedge, firefox,
+    notepad, calc, explorer, spotify, code, winword, excel …)."""
+    try:
+        if platform.system() == "Windows":
+            subprocess.Popen(f'start "" "{name}"', shell=True)
+        else:
+            subprocess.Popen([name])
+        log(f"launched app: {name}")
+        return True
+    except Exception as e:
+        log(f"launch failed ({name}): {e}")
         return False
 
 
@@ -383,7 +399,7 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
         "with ONLY minified JSON, no markdown, no code fences, exactly this "
         'shape: {"found":true,"box":[100,200,140,320],"label":"element name",'
         '"say":"instruction","last":false,"done":false,"double":false,'
-        '"type_text":"","submit":false} . '
+        '"type_text":"","submit":false,"launch_app":""} . '
         "box is the TIGHT bounding box of just that ONE element (not its "
         "whole row, toolbar or panel), in the order top, left, bottom, "
         "right, each normalized 0-1000 of the image height (y) and width "
@@ -405,7 +421,13 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
         "user is about to focus (a search box, an address bar, a form "
         "field), set type_text to the EXACT text to enter, point box at that "
         "field, and set submit=true if pressing Enter should run it (e.g. a "
-        "search). Leave type_text empty for normal click steps.")
+        "search). Leave type_text empty for normal click steps. To OPEN or "
+        "LAUNCH an application rather than clicking its on-screen icon, set "
+        "launch_app to its launch name or executable (e.g. 'chrome', "
+        "'msedge', 'firefox', 'notepad', 'calc', 'explorer', 'spotify', "
+        "'code', 'winword'); use Google Search to get the correct name if "
+        "unsure, and set last=true if opening it completes the task. Leave "
+        "launch_app empty for on-screen click steps.")
 
     contents = [{"role": "user", "parts": [
         {"text": f"Task: {task}\nStep number: {step_no}\n{done_txt}"},
@@ -623,11 +645,14 @@ class Box(QWidget):
         except Exception:
             pass
 
-    def step_at(self, gx, gy, text, typing=False, preview="", auto=False):
+    def step_at(self, gx, gy, text, typing=False, preview="", auto=False,
+                launch=False):
         self._mode = "step"
         self.edit.hide()
         if auto:
             tail = "Acting automatically…   Esc to cancel"
+        elif launch:
+            tail = "⏎ Enter to launch     Esc to cancel"
         elif typing:
             tail = "⏎ Enter to paste     Esc to cancel"
         else:
@@ -1019,6 +1044,8 @@ class CurSir(QObject):
         self._updating = False
         self._pending_update = None
         self._acting = False
+        self._pending_launch = ""
+        self._pending_type = ""
         self._geom = None
         self._last = False
         self._last_label = "that"
@@ -1276,6 +1303,22 @@ class CurSir(QObject):
             self.box.thinking(say)
             QTimer.singleShot(2200, self._cancel)
             return
+        # launch-app step: open an app directly, no icon to click
+        launch = str(res.get("launch_app", "")).strip()
+        if launch:
+            self.glow.stop()
+            self._pending_launch = launch
+            self._pending_type = ""
+            self.target = None
+            self._last = bool(res.get("last"))
+            auto = bool(self.cfg.get("auto_mode"))
+            pos = QCursor.pos()
+            self.box.step_at(pos.x(), pos.y(),
+                             say or f"Launching {launch}, sir.",
+                             launch=True, auto=auto)
+            if auto:
+                QTimer.singleShot(900, self._click_and_next)
+            return
         if not res.get("found") or not res.get("box"):
             self.glow.stop()
             self.box.thinking(say)
@@ -1305,6 +1348,7 @@ class CurSir(QObject):
         self._double = bool(res.get("double"))
         self._pending_type = str(res.get("type_text", "")).strip()
         self._pending_submit = bool(res.get("submit"))
+        self._pending_launch = ""
         QCursor.setPos(self.target[0], self.target[1])
         self.glow.point_at(*self.target)
         auto = bool(self.cfg.get("auto_mode"))
@@ -1318,7 +1362,17 @@ class CurSir(QObject):
             QTimer.singleShot(1000, self._click_and_next)
 
     def _click_and_next(self):
-        if not self.target or getattr(self, "_acting", False):
+        if getattr(self, "_acting", False):
+            return
+        # launch step has no on-screen target
+        if getattr(self, "_pending_launch", ""):
+            self._acting = True
+            self.box.hide()
+            self.glow.stop()
+            QApplication.processEvents()
+            QTimer.singleShot(70, self._do_launch)
+            return
+        if not self.target:
             return
         self._acting = True
         # drop our own window focus + overlays FIRST, so the action lands on
@@ -1330,6 +1384,19 @@ class CurSir(QObject):
             QTimer.singleShot(70, self._do_paste)
         else:
             QTimer.singleShot(70, self._do_click)
+
+    def _do_launch(self):
+        name = getattr(self, "_pending_launch", "")
+        self._pending_launch = ""
+        launch_app(name)
+        self.done_list.append(f"launched {name}")
+        if self._last:
+            self.glow.stop()
+            self.box.thinking("Very good, sir.")
+            QTimer.singleShot(1600, self._cancel)
+            return
+        # give the app a moment to open before the next screenshot
+        QTimer.singleShot(1500, lambda: self._run_step(first=False))
 
     def _do_click(self):
         if not self.target:
