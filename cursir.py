@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -1380,6 +1380,17 @@ class Settings(QWidget):
         if not ok:
             self.progress.hide()
 
+    def reset_to_idle(self):
+        """Restore the panel to its normal (idle) state."""
+        self.progress.hide()
+        self.progress.setValue(0)
+        self.install_btn.hide()
+        self.install_btn.setEnabled(True)
+        self.check_btn.setEnabled(True)
+        self.close_btn.setEnabled(True)
+        self.save_btn.setEnabled(False)
+        self.upd_status.setText(f"CurSir v{VERSION}")
+
     def _shortcut(self):
         ok = create_desktop_shortcut()
         self.upd_status.setText("Desktop shortcut added." if ok
@@ -1563,7 +1574,7 @@ class CurSir(QObject):
         if self._pending_update:
             self.offer_update(self._pending_update)
 
-    _VERIFY_MAX = 10           # ~10 tries x 4s = up to ~40s of waiting
+    _VERIFY_MAX = 8            # ~8 tries x 4s = ~32s, finishes before watchdog
     _INSTALL_TIMEOUT_MS = 60000    # hard watchdog: give up after 60s
 
     def offer_update(self, latest):
@@ -1591,12 +1602,19 @@ class CurSir(QObject):
     def _install_worker(self, latest):
         """Runs off the UI thread. Verifies + applies, reporting via signals."""
         import time as _t
+        start = _t.time()
+        log("install worker: started")
         if getattr(sys, "frozen", False):
             ok = apply_exe_update()
             self._sig_update_done.emit("ok" if ok else "fail", latest)
             return
         for i in range(self._VERIFY_MAX):
             if not self._install_active:      # watchdog gave up already
+                log("install worker: aborted by watchdog")
+                return
+            if _t.time() - start > 55:        # own budget (backup to watchdog)
+                log("install worker: own budget hit — stale")
+                self._sig_update_done.emit("stale", latest)
                 return
             status, data = fetch_source(latest)
             if status == "ok":
@@ -1621,6 +1639,7 @@ class CurSir(QObject):
         if not self._install_active:          # watchdog already aborted
             return
         self._install_active = False
+        log(f"on_update_done: {status}")
         try:
             self._prog_timer.stop()
         except Exception:
@@ -1628,22 +1647,19 @@ class CurSir(QObject):
         self._finish_update(status, latest)
 
     def _install_watchdog(self, latest):
+        log(f"watchdog fired (active={self._install_active})")
         if not self._install_active:          # already finished normally
             return
-        # took too long — stop cleanly instead of hanging forever
+        # took too long — stop cleanly and return to the normal panel
         self._install_active = False
         self._updating = False
-        log("install watchdog: timed out — stopping")
         try:
             self._prog_timer.stop()
         except Exception:
             pass
-        self.settings.end_install(False)
-        self.settings.set_install_status(
-            "The update took too long, sir — stopped. Please try again.")
-        self.settings.show_update(latest)     # keep the Install button
+        self.settings.reset_to_idle()
         self.tray.showMessage(
-            "CurSir", "Update took too long — stopped. Try again, sir.")
+            "CurSir", "Update took too long — stopped, sir. Try again.")
 
     def _finish_update(self, status, latest):
         log(f"finish_update: status={status}")
@@ -1654,19 +1670,15 @@ class CurSir(QObject):
             QTimer.singleShot(1100, self._do_restart)
         elif status == "stale":
             self._updating = False
-            self.settings.end_install(False)
-            self.settings.set_install_status(
-                "Update is still uploading, sir — please try again in a "
-                "minute.")
+            self.settings.reset_to_idle()
             self.settings.show_update(latest)      # keep Install for retry
+            self.settings.set_install_status(
+                "Still uploading, sir — try again shortly.")
         else:
             self._updating = False
-            self.settings.end_install(False)
-            self.settings.set_install_status(
-                "Update failed, sir — opening the download page.")
-            self.tray.showMessage(
-                "CurSir", "Update failed, sir — opening the download page")
-            webbrowser.open(REPO_URL + "/releases/latest")
+            self.settings.reset_to_idle()
+            self.settings.set_install_status("Update failed, sir.")
+            self.tray.showMessage("CurSir", "Update failed, sir.")
 
     def _do_restart(self):
         log("restarting now")
