@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -286,6 +286,26 @@ def resolve_browser(pref):
         if pref.lower() in name.lower():
             return exe
     return BROWSER_MAP.get(pref.lower(), pref)
+
+
+def open_url_in_browser(url, pref="system default"):
+    """Open a URL directly in the preferred/default browser (one fast step)."""
+    if url and not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url
+    try:
+        exe = resolve_browser(pref)
+        if platform.system() == "Windows":
+            if exe and os.path.exists(exe):
+                subprocess.Popen([exe, url])
+            else:
+                subprocess.Popen(f'start "" "{url}"', shell=True)
+        else:
+            subprocess.Popen([exe if exe else "xdg-open", url])
+        log(f"opened url: {url}")
+        return True
+    except Exception as e:
+        log(f"open_url failed ({url}): {e}")
+        return False
 
 
 def launch_app(name):
@@ -576,7 +596,7 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground, apps=None):
         "with ONLY minified JSON, no markdown, no code fences, exactly this "
         'shape: {"found":true,"box":[100,200,140,320],"label":"element name",'
         '"say":"instruction","last":false,"done":false,"double":false,'
-        '"type_text":"","submit":false,"launch_app":""} . '
+        '"type_text":"","submit":false,"launch_app":"","open_url":""} . '
         "box is the TIGHT bounding box of just that ONE element (not its "
         "whole row, toolbar or panel), in the order top, left, bottom, "
         "right, each normalized 0-1000 of the image height (y) and width "
@@ -623,7 +643,16 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground, apps=None):
         "navigating to a site, playing something — set last=FALSE and keep "
         "going once it has opened: next go to the address bar, type the site, "
         "then search and click the result. Opening a browser is almost never "
-        "the final step. When the "
+        "the final step. To reach a website or a search, PREFER opening a "
+        "direct URL over typing it out step by step: set open_url to the most "
+        "direct full URL you can build using your knowledge and Google "
+        "Search — a specific page, a channel (e.g. "
+        "https://www.youtube.com/@penguinz0), or a search-results URL (e.g. "
+        "https://www.youtube.com/results?search_query=penguinz0). Opening a "
+        "URL is ONE fast step instead of launch+type+search, so use it "
+        "whenever the destination is a website. After it loads, if the goal "
+        "still needs a choice (e.g. pick a video), continue with a click. "
+        "When the "
         "task implies an app by PURPOSE (e.g. 'make a video' -> a video "
         "editor, 'edit a photo' -> an image editor, 'take notes' -> a notes "
         "app), pick the BEST-MATCHING app from the user's installed-apps "
@@ -1377,6 +1406,7 @@ class CurSir(QObject):
         self._pending_update = None
         self._acting = False
         self._pending_launch = ""
+        self._pending_open_url = ""
         self._pending_type = ""
         self._apps = None
         self._geom = None
@@ -1689,10 +1719,27 @@ class CurSir(QObject):
             QTimer.singleShot(2200, self._cancel)
             return
         # launch-app step: open an app directly, no icon to click
+        open_url = str(res.get("open_url", "")).strip()
+        if open_url:
+            self.glow.stop()
+            self._pending_open_url = open_url
+            self._pending_launch = ""
+            self._pending_type = ""
+            self.target = None
+            self._last = bool(res.get("last"))
+            auto = bool(self.cfg.get("auto_mode"))
+            pos = QCursor.pos()
+            self.box.step_at(pos.x(), pos.y(),
+                             say or f"Opening {open_url[:44]}…",
+                             launch=True, auto=auto)
+            if auto:
+                QTimer.singleShot(900, self._click_and_next)
+            return
         launch = str(res.get("launch_app", "")).strip()
         if launch:
             self.glow.stop()
             self._pending_launch = launch
+            self._pending_open_url = ""
             self._pending_type = ""
             self.target = None
             self._last = bool(res.get("last"))
@@ -1734,6 +1781,7 @@ class CurSir(QObject):
         self._pending_type = str(res.get("type_text", "")).strip()
         self._pending_submit = bool(res.get("submit"))
         self._pending_launch = ""
+        self._pending_open_url = ""
         QCursor.setPos(self.target[0], self.target[1])
         self.glow.point_at(*self.target)
         auto = bool(self.cfg.get("auto_mode"))
@@ -1748,6 +1796,14 @@ class CurSir(QObject):
 
     def _click_and_next(self):
         if getattr(self, "_acting", False):
+            return
+        # open-url step (fastest path to a website)
+        if getattr(self, "_pending_open_url", ""):
+            self._acting = True
+            self.box.hide()
+            self.glow.stop()
+            QApplication.processEvents()
+            QTimer.singleShot(70, self._do_open_url)
             return
         # launch step has no on-screen target
         if getattr(self, "_pending_launch", ""):
@@ -1789,6 +1845,19 @@ class CurSir(QObject):
             if low in n.lower() or n.lower() in low:
                 return t
         return name                          # let the OS resolver try
+
+    def _do_open_url(self):
+        url = getattr(self, "_pending_open_url", "")
+        self._pending_open_url = ""
+        open_url_in_browser(url, self.cfg.get("browser", "system default"))
+        self.done_list.append(f"opened {url[:44]}")
+        if self._last:
+            self.glow.stop()
+            self.box.message("Very good, sir.")
+            QTimer.singleShot(1600, self._cancel)
+            return
+        # let the page load before the next screenshot
+        QTimer.singleShot(3000, lambda: self._run_step(first=False))
 
     def _do_launch(self):
         name = getattr(self, "_pending_launch", "")
