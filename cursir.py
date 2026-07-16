@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QComboBox, QCheckBox, QPushButton,
                                QSystemTrayIcon, QMenu)
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
