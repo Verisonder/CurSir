@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.2.7"
+VERSION = "0.2.8"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -811,7 +811,7 @@ class Settings(QWidget):
     def __init__(self, ctrl):
         super().__init__(None)
         self.ctrl = ctrl
-        self.setWindowTitle("CurSir — Settings")
+        self.setWindowTitle(f"CurSir {VERSION} — Settings")
         self.setMinimumWidth(420)
 
         form = QFormLayout()
