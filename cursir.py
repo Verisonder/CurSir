@@ -30,7 +30,7 @@ import webbrowser
 from PySide6.QtCore import (Qt, QObject, Signal, QTimer, QPoint,
                             QBuffer, QByteArray, QIODevice)
 from PySide6.QtGui import (QGuiApplication, QCursor, QColor, QPainter, QPen,
-                           QFont, QIcon, QPixmap, QAction)
+                           QFont, QIcon, QPixmap, QAction, QPolygon)
 from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QVBoxLayout, QHBoxLayout, QFormLayout,
                                QComboBox, QCheckBox, QPushButton,
@@ -371,6 +371,14 @@ class Glow(QWidget):
             p.setPen(QPen(col, max(1.0, 3 - i * 0.7)))
             rr = r + (2 - i) * 7
             p.drawEllipse(self._pt, int(rr), int(rr))
+        # blue cursor arrow — its TIP marks the exact click point
+        arrow = [(0, 0), (0, 24), (6, 18), (10, 28), (14, 26),
+                 (10, 17), (17, 17)]
+        poly = QPolygon([QPoint(self._pt.x() + ax, self._pt.y() + ay)
+                         for ax, ay in arrow])
+        p.setPen(QPen(QColor("#ffffff"), 1.6))
+        p.setBrush(QColor(ACCENT))
+        p.drawPolygon(poly)
         p.end()
 
 
