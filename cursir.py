@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.2.5"
+VERSION = "0.2.6"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -374,7 +374,8 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
         "user must click, and locate it PRECISELY in the screenshot. Respond "
         "with ONLY minified JSON, no markdown, no code fences, exactly this "
         'shape: {"found":true,"box":[100,200,140,320],"label":"element name",'
-        '"say":"instruction","last":false,"done":false,"double":false} . '
+        '"say":"instruction","last":false,"done":false,"double":false,'
+        '"type_text":"","submit":false} . '
         "box is the TIGHT bounding box of just that ONE element (not its "
         "whole row, toolbar or panel), in the order top, left, bottom, "
         "right, each normalized 0-1000 of the image height (y) and width "
@@ -392,7 +393,11 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
         "(and make 'say' a short wrap-up) only when the task is ALREADY "
         "fully complete in the screenshot. Set found=false if the needed "
         "element isn't on screen yet (then 'say' explains what to open "
-        "or click first).")
+        "or click first). When the step is to ENTER TEXT into a field the "
+        "user is about to focus (a search box, an address bar, a form "
+        "field), set type_text to the EXACT text to enter, point box at that "
+        "field, and set submit=true if pressing Enter should run it (e.g. a "
+        "search). Leave type_text empty for normal click steps.")
 
     contents = [{"role": "user", "parts": [
         {"text": f"Task: {task}\nStep number: {step_no}\n{done_txt}"},
@@ -610,16 +615,22 @@ class Box(QWidget):
         except Exception:
             pass
 
-    def step_at(self, gx, gy, text):
+    def step_at(self, gx, gy, text, typing=False, preview=""):
         self._mode = "step"
         self.edit.hide()
-        self.status.setText(f"{text}\n\n⏎ Enter to click     Esc to cancel")
+        if typing:
+            shown = (f"{text}\n\nText:  {preview}\n\n"
+                     "⏎ Enter to paste     Esc to cancel")
+        else:
+            shown = f"{text}\n\n⏎ Enter to click     Esc to cancel"
+        self.status.setText(shown)
         self.status.show()
         self.adjustSize()
         self._place(gx + 26, gy + 26)
         self.show()
         self.raise_()
         self.activateWindow()
+        self._force_foreground()
         self.setFocus()
 
     def thinking(self, text="One moment, sir…"):
@@ -1252,21 +1263,28 @@ class CurSir(QObject):
         self._last_label = str(res.get("label", "that")).strip() or "that"
         self._last = bool(res.get("last"))
         self._double = bool(res.get("double"))
+        self._pending_type = str(res.get("type_text", "")).strip()
+        self._pending_submit = bool(res.get("submit"))
         QCursor.setPos(self.target[0], self.target[1])
         self.glow.point_at(*self.target)
-        self.box.step_at(self.target[0], self.target[1], say)
+        if self._pending_type:
+            self.box.step_at(self.target[0], self.target[1], say,
+                             typing=True, preview=self._pending_type)
+        else:
+            self.box.step_at(self.target[0], self.target[1], say)
 
     def _click_and_next(self):
         if not self.target:
             return
-        x, y = self.target
-        # drop our own window focus + overlays FIRST, so the click lands on
-        # the target on the first try instead of just activating our box
+        # drop our own window focus + overlays FIRST, so the action lands on
+        # the target instead of just activating our box
         self.box.hide()
         self.glow.stop()
         QApplication.processEvents()
-        # let Windows settle focus, then move + click
-        QTimer.singleShot(70, self._do_click)
+        if getattr(self, "_pending_type", ""):
+            QTimer.singleShot(70, self._do_paste)
+        else:
+            QTimer.singleShot(70, self._do_click)
 
     def _do_click(self):
         if not self.target:
@@ -1281,6 +1299,38 @@ class CurSir(QObject):
             QTimer.singleShot(1600, self._cancel)
             return
         QTimer.singleShot(700, lambda: self._run_step(first=False))
+
+    def _do_paste(self):
+        if not self.target:
+            return
+        import time as _t
+        x, y = self.target
+        text = self._pending_type
+        QCursor.setPos(x, y)
+        self._os_click(False)                 # focus the field
+        _t.sleep(0.10)
+        try:
+            QApplication.clipboard().setText(text)
+            from pynput.keyboard import Key, Controller
+            kb = Controller()
+            _t.sleep(0.05)
+            with kb.pressed(Key.ctrl):         # paste
+                kb.press('v')
+                kb.release('v')
+            if self._pending_submit:
+                _t.sleep(0.08)
+                kb.press(Key.enter)
+                kb.release(Key.enter)
+        except Exception:
+            pass
+        self.done_list.append(f"typed «{text[:24]}»")
+        self._pending_type = ""
+        if self._last:
+            self.glow.stop()
+            self.box.thinking("Very good, sir.")
+            QTimer.singleShot(1600, self._cancel)
+            return
+        QTimer.singleShot(800, lambda: self._run_step(first=False))
 
     def _cancel(self):
         self.busy = False
