@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu)
 
 VERSION = "0.1.1"
+DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.json")
 ACCENT = "#379ED6"
 REPO_URL = "https://github.com/Verisonder/CurSir"
@@ -568,6 +569,10 @@ class Vision(QObject):
         def work():
             res = gemini_locate(key, task, done_list, shot, think, ground)
             res = res or {}
+            if DEBUG:
+                print(f"[CurSir] first-pass: found={res.get('found')} "
+                      f"box={res.get('box')} label={res.get('label')!r} "
+                      f"say={res.get('say')!r}")
             # zoom-refine pass — same trick that makes the cat's guide precise
             try:
                 if (res.get("found") and not res.get("done")
@@ -578,10 +583,16 @@ class Vision(QObject):
                         ref = zoom_refine(key, str(res.get("label")
                                           or "the element"),
                                           res["box"], img, think)
+                        if DEBUG:
+                            print(f"[CurSir] zoom-refine (area={area:.4f}): "
+                                  f"{ref}")
                         if ref is not None:
                             res["_center"] = ref     # (nx, ny) 0-1000, refined
-            except Exception:
-                pass
+                    elif DEBUG:
+                        print(f"[CurSir] zoom skipped (area={area:.4f})")
+            except Exception as e:
+                if DEBUG:
+                    print(f"[CurSir] zoom error: {e}")
             self.done.emit(res)
 
         threading.Thread(target=work, daemon=True).start()
@@ -810,7 +821,7 @@ class CurSir(QObject):
         self.busy = True
         think, do_zoom, ground, shot_w = QUALITY.get(
             self.cfg.get("quality"), QUALITY["balanced"])
-        self.box.thinking("looking… 👀" if first else "checking next… 👀")
+        self.box.hide()            # keep OUR box/glow out of the screenshot
         self.glow.stop()
         QApplication.processEvents()
         shot, geom, img = self._grab(shot_w)
@@ -819,6 +830,7 @@ class CurSir(QObject):
             self.box.thinking("couldn't grab the screen 😿")
             self.busy = False
             return
+        self.box.thinking("looking… 👀" if first else "checking next… 👀")
         self.vision.run(self.cfg["gemini_key"], self.task, self.done_list,
                         shot, think, ground, do_zoom, img)
 
@@ -853,6 +865,10 @@ class CurSir(QObject):
         cx = g.x() + (nx / 1000.0) * g.width()
         cy = g.y() + (ny / 1000.0) * g.height()
         self.target = (int(cx), int(cy))
+        if DEBUG:
+            print(f"[CurSir] map: nx={nx:.1f} ny={ny:.1f} | "
+                  f"geom=({g.x()},{g.y()},{g.width()}x{g.height()}) | "
+                  f"screen=({int(cx)},{int(cy)})")
         self._last_label = str(res.get("label", "that")).strip() or "that"
         self._last = bool(res.get("last"))
         QCursor.setPos(self.target[0], self.target[1])
