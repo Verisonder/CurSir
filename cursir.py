@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.2.8"
+VERSION = "0.2.9"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -78,7 +78,8 @@ HOTKEY_PRESETS = ["ctrl+win", "ctrl+alt+space", "ctrl+shift+space",
 
 DEFAULTS = {"gemini_key": "", "quality": "balanced",
             "hotkey": "ctrl+win", "auto_update": True,
-            "start_with_windows": False, "start_on_launch": False}
+            "start_with_windows": False, "start_on_launch": False,
+            "auto_mode": False}
 
 
 def load_cfg():
@@ -622,14 +623,19 @@ class Box(QWidget):
         except Exception:
             pass
 
-    def step_at(self, gx, gy, text, typing=False, preview=""):
+    def step_at(self, gx, gy, text, typing=False, preview="", auto=False):
         self._mode = "step"
         self.edit.hide()
-        if typing:
-            shown = (f"{text}\n\nText:  {preview}\n\n"
-                     "⏎ Enter to paste     Esc to cancel")
+        if auto:
+            tail = "Acting automatically…   Esc to cancel"
+        elif typing:
+            tail = "⏎ Enter to paste     Esc to cancel"
         else:
-            shown = f"{text}\n\n⏎ Enter to click     Esc to cancel"
+            tail = "⏎ Enter to click     Esc to cancel"
+        if typing:
+            shown = f"{text}\n\nText:  {preview}\n\n{tail}"
+        else:
+            shown = f"{text}\n\n{tail}"
         self.status.setText(shown)
         self.status.show()
         self.adjustSize()
@@ -829,10 +835,12 @@ class Settings(QWidget):
         self.autoupd = QCheckBox("Check for updates automatically")
         self.autostart = QCheckBox("Start CurSir when Windows starts")
         self.startlaunch = QCheckBox("Start CurSir automatically when I open it")
+        self.automode = QCheckBox("Auto mode — act without pressing Enter")
 
         form.addRow("Gemini API key", self.key_edit)
         form.addRow("Hotkey", self.hotkey_edit)
         form.addRow("Quality", self.quality_edit)
+        form.addRow("", self.automode)
         form.addRow("", self.startlaunch)
         form.addRow("", self.autostart)
         form.addRow("", self.autoupd)
@@ -898,6 +906,7 @@ class Settings(QWidget):
         self.startlaunch.toggled.connect(self._mark_dirty)
         self.autostart.toggled.connect(self._mark_dirty)
         self.autoupd.toggled.connect(self._mark_dirty)
+        self.automode.toggled.connect(self._mark_dirty)
 
     def load_from(self, cfg):
         self._loading = True
@@ -907,6 +916,7 @@ class Settings(QWidget):
         self.autoupd.setChecked(bool(cfg.get("auto_update", True)))
         self.autostart.setChecked(bool(cfg.get("start_with_windows", False)))
         self.startlaunch.setChecked(bool(cfg.get("start_on_launch", False)))
+        self.automode.setChecked(bool(cfg.get("auto_mode", False)))
         self._loading = False
         self.save_btn.setEnabled(False)
         self.refresh_state(getattr(self.ctrl, "armed", False))
@@ -930,7 +940,8 @@ class Settings(QWidget):
             quality=self.quality_edit.currentText(),
             auto_update=self.autoupd.isChecked(),
             start_with_windows=self.autostart.isChecked(),
-            start_on_launch=self.startlaunch.isChecked())
+            start_on_launch=self.startlaunch.isChecked(),
+            auto_mode=self.automode.isChecked())
         self.upd_status.setText("Saved ✓")
         self.save_btn.setEnabled(False)
 
@@ -1007,6 +1018,7 @@ class CurSir(QObject):
         self.busy = False
         self._updating = False
         self._pending_update = None
+        self._acting = False
         self._geom = None
         self._last = False
         self._last_label = "that"
@@ -1105,12 +1117,13 @@ class CurSir(QObject):
         self.settings.activateWindow()
 
     def apply_settings(self, key, hotkey, quality, auto_update,
-                       start_with_windows, start_on_launch):
+                       start_with_windows, start_on_launch, auto_mode):
         old_hotkey = self.cfg.get("hotkey")
         self.cfg.update({"gemini_key": key, "hotkey": hotkey,
                          "quality": quality, "auto_update": auto_update,
                          "start_with_windows": start_with_windows,
-                         "start_on_launch": start_on_launch})
+                         "start_on_launch": start_on_launch,
+                         "auto_mode": auto_mode})
         save_cfg(self.cfg)
         if hotkey != old_hotkey and self.armed:
             self.hotkey.restart(hotkey)     # only if currently running
@@ -1232,6 +1245,7 @@ class CurSir(QObject):
         self._run_step(first=True)
 
     def _run_step(self, first):
+        self._acting = False
         if not self.cfg.get("gemini_key"):
             self.box.thinking("No API key set, sir — kindly add one in Settings.")
             return
@@ -1293,15 +1307,20 @@ class CurSir(QObject):
         self._pending_submit = bool(res.get("submit"))
         QCursor.setPos(self.target[0], self.target[1])
         self.glow.point_at(*self.target)
+        auto = bool(self.cfg.get("auto_mode"))
         if self._pending_type:
             self.box.step_at(self.target[0], self.target[1], say,
-                             typing=True, preview=self._pending_type)
+                             typing=True, preview=self._pending_type, auto=auto)
         else:
-            self.box.step_at(self.target[0], self.target[1], say)
+            self.box.step_at(self.target[0], self.target[1], say, auto=auto)
+        if auto:
+            # act on its own after a beat so the glow is visible (Esc cancels)
+            QTimer.singleShot(1000, self._click_and_next)
 
     def _click_and_next(self):
-        if not self.target:
+        if not self.target or getattr(self, "_acting", False):
             return
+        self._acting = True
         # drop our own window focus + overlays FIRST, so the action lands on
         # the target instead of just activating our box
         self.box.hide()
@@ -1360,6 +1379,7 @@ class CurSir(QObject):
 
     def _cancel(self):
         self.busy = False
+        self._acting = False
         self.target = None
         self.glow.stop()
         self.box.hide()
