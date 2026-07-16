@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QComboBox, QCheckBox, QPushButton,
                                QSystemTrayIcon, QMenu)
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.json")
 ACCENT = "#379ED6"
@@ -169,7 +169,37 @@ def set_autostart(enable):
         return False
 
 
-# ---------------------------------------------------------------- Gemini ----
+def create_desktop_shortcut():
+    """Create (or refresh) a CurSir shortcut on the Desktop via PowerShell's
+    WScript.Shell — no extra dependencies. Returns True on success."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        lnk = os.path.join(desktop, "CurSir.lnk")
+        if getattr(sys, "frozen", False):
+            target = sys.executable                 # the CurSir.exe
+            args = ""
+            icon = sys.executable                   # icon is embedded in exe
+        else:
+            base = os.path.dirname(sys.executable)
+            pyw = os.path.join(base, "pythonw.exe")
+            target = pyw if os.path.exists(pyw) else sys.executable
+            args = f'"{os.path.abspath(__file__)}"'
+            ico = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "cursir.ico")
+            icon = ico if os.path.exists(ico) else target
+        ps = (
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut("
+            f"'{lnk}');$s.TargetPath='{target}';$s.Arguments='{args}';"
+            f"$s.IconLocation='{icon}';$s.WorkingDirectory="
+            f"'{os.path.dirname(target)}';$s.Save()")
+        subprocess.run(["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+                        "-Command", ps], creationflags=0x08000000,
+                       timeout=15, check=False)
+        return os.path.exists(lnk)
+    except Exception:
+        return False
 def gemini_call_json(key, contents, persona, think, ground, max_tokens=400):
     """POST to Gemini (model fallback, optional grounding). Returns the
     parsed JSON object the model produced, or {} on failure."""
@@ -647,6 +677,8 @@ class Settings(QWidget):
         self.upd_status = QLabel(f"CurSir v{VERSION}")
         check_btn = QPushButton("Check for updates")
         check_btn.clicked.connect(self._check)
+        shortcut_btn = QPushButton("Add desktop shortcut")
+        shortcut_btn.clicked.connect(self._shortcut)
 
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(self._save)
@@ -655,6 +687,7 @@ class Settings(QWidget):
 
         row = QHBoxLayout()
         row.addWidget(check_btn)
+        row.addWidget(shortcut_btn)
         row.addStretch(1)
         row.addWidget(save_btn)
         row.addWidget(close_btn)
@@ -690,6 +723,11 @@ class Settings(QWidget):
         else:
             self.upd_status.setText(f"Up to date (v{VERSION})")
 
+    def _shortcut(self):
+        ok = create_desktop_shortcut()
+        self.upd_status.setText("Desktop shortcut added ✓" if ok
+                                else "Couldn't create shortcut")
+
 
 # ----------------------------------------------------------- controller ----
 class CurSir(QObject):
@@ -723,6 +761,9 @@ class CurSir(QObject):
         self.hotkey.start()
         print(f"CurSir v{VERSION} running. Hotkey: "
               f"{self.cfg.get('hotkey')}. (tray icon → Settings)")
+        if not os.path.exists(CONFIG_PATH):     # first launch
+            create_desktop_shortcut()
+            save_cfg(self.cfg)                  # so next launch isn't "first"
         if self.cfg.get("start_with_windows"):
             set_autostart(True)
         if not self.cfg.get("gemini_key"):
