@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -79,7 +79,8 @@ HOTKEY_PRESETS = ["ctrl+win", "ctrl+alt+space", "ctrl+shift+space",
 DEFAULTS = {"gemini_key": "", "quality": "balanced",
             "hotkey": "ctrl+win", "auto_update": True,
             "start_with_windows": False, "start_on_launch": False,
-            "auto_mode": False, "browser": "system default"}
+            "auto_mode": False, "browser": "system default",
+            "thinking_style": "wide"}
 
 
 def load_cfg():
@@ -769,18 +770,29 @@ class Glow(QWidget):
 
 
 class Spinner(QWidget):
-    """A small rotating sci-fi 'thinking' indicator (concentric arcs)."""
+    """Rotating sci-fi 'thinking' indicator. Two looks:
+    'compact' = just the reactor; 'wide' = reactor + HUD scan lines filling
+    the box width."""
 
-    def __init__(self):
+    def __init__(self, mode="wide"):
         super().__init__()
-        self.setFixedSize(340, 60)
+        self._mode = mode
         self._ang = 0.0
+        self._apply_size()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
 
+    def _apply_size(self):
+        self.setFixedSize(340 if self._mode == "wide" else 78, 60)
+
+    def set_mode(self, mode):
+        self._mode = mode if mode in ("wide", "compact") else "wide"
+        self._apply_size()
+        self.update()
+
     def start(self):
         if not self._timer.isActive():
-            self._timer.start(16)      # ~60 fps
+            self._timer.start(16)
         self.show()
 
     def stop(self):
@@ -791,12 +803,8 @@ class Spinner(QWidget):
         self._ang = (self._ang + 3.2) % 360
         self.update()
 
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        cx, cy = self.width() / 2, self.height() / 2
+    def _draw_reactor(self, p, cx, cy):
         a = self._ang
-        # concentric arcs spinning at different speeds/directions
         for r, start, span, w, alpha in (
                 (24, a, 110, 3, 255),
                 (24, a + 180, 110, 3, 255),
@@ -805,15 +813,36 @@ class Spinner(QWidget):
             col = QColor(ACCENT)
             col.setAlpha(alpha)
             p.setPen(QPen(col, w))
-            rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
-            p.drawArc(rect, int(start * 16), int(span * 16))
-        # pulsing core
+            p.drawArc(QRectF(cx - r, cy - r, 2 * r, 2 * r),
+                      int(start * 16), int(span * 16))
         pr = 3.0 + 1.8 * (1 + math.sin(math.radians(a * 3))) / 2
         core = QColor(ACCENT)
         core.setAlpha(235)
         p.setBrush(core)
         p.setPen(Qt.NoPen)
         p.drawEllipse(QPointF(cx, cy), pr, pr)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        cx, cy = self.width() / 2, self.height() / 2
+        if self._mode == "wide":
+            # HUD scan lines filling the width, dashes travelling outward
+            base = QColor(ACCENT)
+            base.setAlpha(38)
+            p.setPen(QPen(base, 1))
+            p.drawLine(14, int(cy), self.width() - 14, int(cy))
+            half = (self.width() / 2) - 44
+            for side in (-1, 1):
+                for i in range(10):
+                    off = (i * 26 + self._ang * 1.4) % half
+                    x = cx + side * (34 + off)
+                    fade = max(0, 1 - off / half)
+                    col = QColor(ACCENT)
+                    col.setAlpha(int(200 * fade))
+                    p.setPen(QPen(col, 2))
+                    p.drawLine(int(x), int(cy - 5), int(x), int(cy + 5))
+        self._draw_reactor(p, cx, cy)
         p.end()
 
 
@@ -924,6 +953,9 @@ class Box(QWidget):
         self.activateWindow()
         self._force_foreground()
         self.setFocus()
+
+    def set_thinking_style(self, style):
+        self.spinner.set_mode(style)
 
     def thinking(self, text=None):
         self._mode = "wait"
@@ -1126,6 +1158,9 @@ class Settings(QWidget):
         self.browser_edit = QComboBox()
         self.browser_edit.addItem("system default")   # filled in load_from
 
+        self.think_edit = QComboBox()
+        self.think_edit.addItems(["wide", "compact"])
+
         self.autoupd = QCheckBox("Check for updates automatically")
         self.autostart = QCheckBox("Start CurSir when Windows starts")
         self.startlaunch = QCheckBox("Start CurSir automatically when I open it")
@@ -1135,6 +1170,7 @@ class Settings(QWidget):
         form.addRow("Hotkey", self.hotkey_edit)
         form.addRow("Quality", self.quality_edit)
         form.addRow("Browser", self.browser_edit)
+        form.addRow("Thinking animation", self.think_edit)
         form.addRow("", self.automode)
         form.addRow("", self.startlaunch)
         form.addRow("", self.autostart)
@@ -1199,6 +1235,7 @@ class Settings(QWidget):
         self.hotkey_edit.currentTextChanged.connect(self._mark_dirty)
         self.quality_edit.currentTextChanged.connect(self._mark_dirty)
         self.browser_edit.currentTextChanged.connect(self._mark_dirty)
+        self.think_edit.currentTextChanged.connect(self._mark_dirty)
         self.startlaunch.toggled.connect(self._mark_dirty)
         self.autostart.toggled.connect(self._mark_dirty)
         self.autoupd.toggled.connect(self._mark_dirty)
@@ -1224,6 +1261,7 @@ class Settings(QWidget):
         self.autostart.setChecked(bool(cfg.get("start_with_windows", False)))
         self.startlaunch.setChecked(bool(cfg.get("start_on_launch", False)))
         self.automode.setChecked(bool(cfg.get("auto_mode", False)))
+        self.think_edit.setCurrentText(cfg.get("thinking_style", "wide"))
         self._loading = False
         self.save_btn.setEnabled(False)
         self.refresh_state(getattr(self.ctrl, "armed", False))
@@ -1249,7 +1287,8 @@ class Settings(QWidget):
             auto_update=self.autoupd.isChecked(),
             start_with_windows=self.autostart.isChecked(),
             start_on_launch=self.startlaunch.isChecked(),
-            auto_mode=self.automode.isChecked())
+            auto_mode=self.automode.isChecked(),
+            thinking_style=self.think_edit.currentText())
         self.upd_status.setText("Saved ✓")
         self.save_btn.setEnabled(False)
 
@@ -1321,6 +1360,7 @@ class CurSir(QObject):
         self._sig_update_found.connect(self._present_update)
         self._sig_update_done.connect(self._on_update_done)
         self._sig_update_status.connect(self.settings.set_install_status)
+        self.box.set_thinking_style(cfg.get("thinking_style", "wide"))
 
         self.task = ""
         self.done_list = []
@@ -1431,14 +1471,17 @@ class CurSir(QObject):
         self.settings.activateWindow()
 
     def apply_settings(self, key, hotkey, quality, browser, auto_update,
-                       start_with_windows, start_on_launch, auto_mode):
+                       start_with_windows, start_on_launch, auto_mode,
+                       thinking_style):
         old_hotkey = self.cfg.get("hotkey")
         self.cfg.update({"gemini_key": key, "hotkey": hotkey,
                          "quality": quality, "browser": browser,
                          "auto_update": auto_update,
                          "start_with_windows": start_with_windows,
                          "start_on_launch": start_on_launch,
-                         "auto_mode": auto_mode})
+                         "auto_mode": auto_mode,
+                         "thinking_style": thinking_style})
+        self.box.set_thinking_style(thinking_style)
         save_cfg(self.cfg)
         if hotkey != old_hotkey and self.armed:
             self.hotkey.restart(hotkey)     # only if currently running
