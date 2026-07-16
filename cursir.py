@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -76,7 +76,7 @@ HOTKEY_PRESETS = ["ctrl+win", "ctrl+alt+space", "ctrl+shift+space",
 
 DEFAULTS = {"gemini_key": "", "quality": "balanced",
             "hotkey": "ctrl+win", "auto_update": True,
-            "start_with_windows": False}
+            "start_with_windows": False, "start_on_launch": False}
 
 
 def load_cfg():
@@ -218,9 +218,12 @@ def set_autostart(enable):
                            winreg.KEY_SET_VALUE)
         if enable:
             if getattr(sys, "frozen", False):
-                cmd = f'"{sys.executable}"'
+                cmd = f'"{sys.executable}" --autostart'
             else:
-                cmd = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+                base = os.path.dirname(sys.executable)
+                pyw = os.path.join(base, "pythonw.exe")
+                exe = pyw if os.path.exists(pyw) else sys.executable
+                cmd = f'"{exe}" "{os.path.abspath(__file__)}" --autostart'
             winreg.SetValueEx(k, "CurSir", 0, winreg.REG_SZ, cmd)
         else:
             try:
@@ -243,13 +246,13 @@ def create_desktop_shortcut():
         lnk = os.path.join(desktop, "CurSir.lnk")
         if getattr(sys, "frozen", False):
             target = sys.executable                 # the CurSir.exe
-            args = "--settings"
+            args = ""
             icon = sys.executable                   # icon is embedded in exe
         else:
             base = os.path.dirname(sys.executable)
             pyw = os.path.join(base, "pythonw.exe")
             target = pyw if os.path.exists(pyw) else sys.executable
-            args = f'"{os.path.abspath(__file__)}" --settings'
+            args = f'"{os.path.abspath(__file__)}"'
             ico = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "cursir.ico")
             icon = ico if os.path.exists(ico) else target
@@ -671,6 +674,16 @@ class Hotkey(QObject):
         self.set_combo(combo)
         self.start()
 
+    def stop(self):
+        try:
+            if self._listener is not None:
+                self._listener.stop()
+        except Exception:
+            pass
+        self._listener = None
+        self._pressed = set()
+        self._armed = True
+
     def _match(self):
         if not self._mods.issubset(self._pressed):
             return False
@@ -757,12 +770,20 @@ class Settings(QWidget):
 
         self.autoupd = QCheckBox("Check for updates automatically")
         self.autostart = QCheckBox("Start CurSir when Windows starts")
+        self.startlaunch = QCheckBox("Start CurSir automatically when I open it")
 
         form.addRow("Gemini API key", self.key_edit)
         form.addRow("Hotkey", self.hotkey_edit)
         form.addRow("Quality", self.quality_edit)
-        form.addRow("", self.autoupd)
+        form.addRow("", self.startlaunch)
         form.addRow("", self.autostart)
+        form.addRow("", self.autoupd)
+
+        # big Start/Stop control — this is what actually runs CurSir
+        self.state_lbl = QLabel("CurSir is stopped")
+        self.toggle_btn = QPushButton("Start CurSir")
+        self.toggle_btn.setMinimumHeight(34)
+        self.toggle_btn.clicked.connect(self._toggle)
 
         self.upd_status = QLabel(f"CurSir v{VERSION}")
         check_btn = QPushButton("Check for updates")
@@ -783,6 +804,9 @@ class Settings(QWidget):
         row.addWidget(close_btn)
 
         lay = QVBoxLayout(self)
+        lay.addWidget(self.state_lbl)
+        lay.addWidget(self.toggle_btn)
+        lay.addSpacing(6)
         lay.addLayout(form)
         lay.addWidget(self.upd_status)
         lay.addLayout(row)
@@ -793,6 +817,16 @@ class Settings(QWidget):
         self.quality_edit.setCurrentText(cfg.get("quality", "balanced"))
         self.autoupd.setChecked(bool(cfg.get("auto_update", True)))
         self.autostart.setChecked(bool(cfg.get("start_with_windows", False)))
+        self.startlaunch.setChecked(bool(cfg.get("start_on_launch", False)))
+        self.refresh_state(getattr(self.ctrl, "armed", False))
+
+    def refresh_state(self, armed):
+        self.state_lbl.setText("CurSir is running" if armed
+                               else "CurSir is stopped")
+        self.toggle_btn.setText("Stop CurSir" if armed else "Start CurSir")
+
+    def _toggle(self):
+        self.ctrl.set_armed(not self.ctrl.armed)
 
     def _save(self):
         self.ctrl.apply_settings(
@@ -800,7 +834,8 @@ class Settings(QWidget):
             hotkey=self.hotkey_edit.currentText().strip() or "ctrl+win",
             quality=self.quality_edit.currentText(),
             auto_update=self.autoupd.isChecked(),
-            start_with_windows=self.autostart.isChecked())
+            start_with_windows=self.autostart.isChecked(),
+            start_on_launch=self.startlaunch.isChecked())
         self.upd_status.setText("Saved ✓")
 
     def _check(self):
@@ -838,6 +873,7 @@ class CurSir(QObject):
         self._geom = None
         self._last = False
         self._last_label = "that"
+        self.armed = False
 
         self.box.submitted.connect(self._start_task)
         self.box.confirmed.connect(self._click_and_next)
@@ -848,33 +884,51 @@ class CurSir(QObject):
         self._build_tray()
 
     # -- lifecycle ----------------------------------------------------------
-    def start(self, want_settings=False):
-        self.hotkey.start()
-        print(f"CurSir v{VERSION} running. Hotkey: "
-              f"{self.cfg.get('hotkey')}. (tray icon → Settings)")
-        if not os.path.exists(CONFIG_PATH):     # first launch
-            create_desktop_shortcut()
-            save_cfg(self.cfg)                  # so next launch isn't "first"
+    def start(self, autostart=False):
+        print(f"CurSir v{VERSION} loaded. Hotkey: {self.cfg.get('hotkey')}.")
         if self.cfg.get("start_with_windows"):
             set_autostart(True)
-        if want_settings or not self.cfg.get("gemini_key"):
-            self.open_settings()   # shortcut launch, or first run without key
-        elif self.cfg.get("auto_update"):
+        if autostart:
+            # launched at boot → run silently, no window
+            self.set_armed(True)
+        else:
+            # launched normally (shortcut) → always show Settings, don't arm
+            self.open_settings()
+            if self.cfg.get("start_on_launch"):
+                self.set_armed(True)
+        if self.cfg.get("auto_update"):
             QTimer.singleShot(3000, self._bg_update_check)
+
+    def set_armed(self, on):
+        """Arm/disarm the global hotkey (i.e. actually 'start' CurSir)."""
+        if on and not self.armed:
+            self.hotkey.restart(self.cfg.get("hotkey", "ctrl+win"))
+            self.armed = True
+        elif not on and self.armed:
+            self.hotkey.stop()
+            self.armed = False
+            self._cancel()
+        self.tray.setToolTip("CurSir — running" if self.armed
+                             else "CurSir — stopped")
+        if hasattr(self, "a_toggle"):
+            self.a_toggle.setText("Stop CurSir" if self.armed
+                                  else "Start CurSir")
+        if hasattr(self, "settings"):
+            self.settings.refresh_state(self.armed)
 
     def _build_tray(self):
         self.tray = QSystemTrayIcon(self._make_icon(), self)
-        self.tray.setToolTip("CurSir")
+        self.tray.setToolTip("CurSir — stopped")
         menu = QMenu()
+        self.a_toggle = QAction("Start CurSir", self)
+        self.a_toggle.triggered.connect(lambda: self.set_armed(not self.armed))
         a_set = QAction("Settings", self)
         a_set.triggered.connect(self.open_settings)
-        a_go = QAction("Trigger now", self)
-        a_go.triggered.connect(self._trigger)
         a_upd = QAction("Check for updates", self)
         a_upd.triggered.connect(self._manual_update_check)
         a_quit = QAction("Quit", self)
         a_quit.triggered.connect(QApplication.instance().quit)
-        for a in (a_set, a_go, a_upd):
+        for a in (self.a_toggle, a_set, a_upd):
             menu.addAction(a)
         menu.addSeparator()
         menu.addAction(a_quit)
@@ -906,14 +960,15 @@ class CurSir(QObject):
         self.settings.activateWindow()
 
     def apply_settings(self, key, hotkey, quality, auto_update,
-                       start_with_windows):
+                       start_with_windows, start_on_launch):
         old_hotkey = self.cfg.get("hotkey")
         self.cfg.update({"gemini_key": key, "hotkey": hotkey,
                          "quality": quality, "auto_update": auto_update,
-                         "start_with_windows": start_with_windows})
+                         "start_with_windows": start_with_windows,
+                         "start_on_launch": start_on_launch})
         save_cfg(self.cfg)
-        if hotkey != old_hotkey:
-            self.hotkey.restart(hotkey)
+        if hotkey != old_hotkey and self.armed:
+            self.hotkey.restart(hotkey)     # only if currently running
         set_autostart(start_with_windows)
 
     # -- updates ------------------------------------------------------------
@@ -1179,7 +1234,7 @@ def main():
     si.start_server()
     cur = CurSir(load_cfg())
     si.settings_requested.connect(cur.open_settings)
-    cur.start(want_settings=("--settings" in sys.argv))
+    cur.start(autostart=("--autostart" in sys.argv))
     sys.exit(app.exec())
 
 
