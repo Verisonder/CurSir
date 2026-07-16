@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -453,6 +453,7 @@ class Glow(QWidget):
         self._pt = QPoint(0, 0)
         self._phase = 0.0
         self._on = False
+        self._follow = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
 
@@ -460,8 +461,9 @@ class Glow(QWidget):
         vg = QGuiApplication.primaryScreen().virtualGeometry()
         self.setGeometry(vg)
 
-    def point_at(self, gx, gy):
+    def point_at(self, gx, gy, follow=False):
         self._cover()
+        self._follow = follow
         self._pt = QPoint(int(gx) - self.x(), int(gy) - self.y())
         self._on = True
         if not self._timer.isActive():
@@ -472,11 +474,16 @@ class Glow(QWidget):
 
     def stop(self):
         self._on = False
+        self._follow = False
         self._timer.stop()
         self.hide()
 
     def _tick(self):
         self._phase = (self._phase + 0.12) % (2 * math.pi)
+        if getattr(self, "_follow", False):
+            # track the real mouse pointer so the glow stays on the cursor
+            pos = QCursor.pos()
+            self._pt = QPoint(pos.x() - self.x(), pos.y() - self.y())
         self.update()
 
     def paintEvent(self, _e):
@@ -491,17 +498,14 @@ class Glow(QWidget):
             p.setPen(QPen(col, max(1.0, 3 - i * 0.7)))
             rr = r + (2 - i) * 7
             p.drawEllipse(self._pt, int(rr), int(rr))
-        # blue cursor arrow — smaller, precisely centred, glowing
+        # blue cursor arrow — TIP sits exactly on the point (= real pointer)
         arrow = [(0, 0), (0, 24), (6, 18), (10, 28), (14, 26),
                  (10, 17), (17, 17)]
-        sc = 0.6
-        pts = [(ax * sc, ay * sc) for ax, ay in arrow]
-        wid = max(x for x, _ in pts)
-        hei = max(y for _, y in pts)
-        ox = self._pt.x() - wid / 2.0
-        oy = self._pt.y() - hei / 2.0 - 5    # nudge up so it centres in ring
-        poly = QPolygon([QPoint(round(ox + x), round(oy + y))
-                         for x, y in pts])
+        sc = 0.85
+        ox = self._pt.x()
+        oy = self._pt.y()
+        poly = QPolygon([QPoint(round(ox + ax * sc), round(oy + ay * sc))
+                         for ax, ay in arrow])
         halo = int(120 + 80 * (1 + math.sin(self._phase)) / 2)   # breathe
         for pw, a in ((14, halo // 4), (9, halo // 3), (5, halo // 2)):
             gc = QColor(ACCENT)
@@ -1137,7 +1141,7 @@ class CurSir(QObject):
             self.open_settings()
             return
         pos = QCursor.pos()
-        self.glow.point_at(pos.x(), pos.y())
+        self.glow.point_at(pos.x(), pos.y(), follow=True)
         self.box.ask_at(pos.x(), pos.y())
 
     def _start_task(self, task):
