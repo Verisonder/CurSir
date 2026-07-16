@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -390,12 +390,17 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
                 if done_list else "This is the FIRST step.")
 
     persona = (
-        "You are CurSir, a courteous on-screen BUTLER who controls the "
-        "user's mouse. The user asked you to do or find something in the app "
-        "shown in the screenshot. Work out the ACTUAL correct way to do it "
-        "using what you know and Google Search when useful - do NOT guess "
-        "from the screenshot alone. Then find the SINGLE next UI element the "
-        "user must click, and locate it PRECISELY in the screenshot. Respond "
+        "You are CurSir, a courteous on-screen BUTLER who ACTS on the user's "
+        "behalf by controlling their mouse and keyboard. EVERY step you MUST "
+        "return a concrete ACTION that YOU perform — click an element, type "
+        "text into a field, or launch an app. You must NEVER simply tell the "
+        "user to do something themselves (never 'navigate to…', 'go to…', "
+        "'open… yourself'); instead produce the action that does it. The "
+        "user asked you to do or find something in the app shown in the "
+        "screenshot. Work out the ACTUAL correct way to do it using what you "
+        "know and Google Search when useful - do NOT guess from the "
+        "screenshot alone. Then find the SINGLE next UI element to act on and "
+        "locate it PRECISELY in the screenshot. Respond "
         "with ONLY minified JSON, no markdown, no code fences, exactly this "
         'shape: {"found":true,"box":[100,200,140,320],"label":"element name",'
         '"say":"instruction","last":false,"done":false,"double":false,'
@@ -415,13 +420,20 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
         "last:true on the very first step) - do NOT set last:true if the "
         "user will still need another step after this one. Set done=true "
         "(and make 'say' a short wrap-up) only when the task is ALREADY "
-        "fully complete in the screenshot. Set found=false if the needed "
-        "element isn't on screen yet (then 'say' explains what to open "
-        "or click first). When the step is to ENTER TEXT into a field the "
+        "fully complete in the screenshot. Only as a LAST RESORT, if the "
+        "next element is genuinely not visible and you cannot act without "
+        "the user first opening something you cannot open yourself, set "
+        "found=false. Do NOT use found=false just to tell the user to do a "
+        "step you could do — prefer clicking, typing, or launching. When "
+        "the step is to ENTER TEXT into a field the "
         "user is about to focus (a search box, an address bar, a form "
         "field), set type_text to the EXACT text to enter, point box at that "
         "field, and set submit=true if pressing Enter should run it (e.g. a "
-        "search). Leave type_text empty for normal click steps. To OPEN or "
+        "search). To GO TO A WEBSITE, do NOT tell the user to navigate: "
+        "point box at the browser's address/URL bar, set type_text to the "
+        "full URL (e.g. 'youtube.com') and submit=true. If no browser is "
+        "open, launch one first. Leave type_text empty for normal click "
+        "steps. To OPEN or "
         "LAUNCH an application rather than clicking its on-screen icon, set "
         "launch_app to its launch name or executable (e.g. 'chrome', "
         "'msedge', 'firefox', 'notepad', 'calc', 'explorer', 'spotify', "
