@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.3.6"
+VERSION = "0.3.7"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -300,6 +300,59 @@ def launch_app(name):
         return True
     except Exception as e:
         log(f"launch failed ({name}): {e}")
+        return False
+
+
+def fetch_source(target):
+    """Download cursir.py and confirm it has ACTUALLY reached the target
+    version (not a half-propagated CDN copy). Returns (status, data):
+    'ok'+bytes when verified, 'stale'+None when not uploaded yet, 'fail'."""
+    if getattr(sys, "frozen", False):
+        return ("fail", None)
+    import urllib.request
+    import re
+    try:
+        log("update: fetching cursir.py to verify")
+        with urllib.request.urlopen(RAW_SOURCE_URL, timeout=20) as r:
+            data = r.read()
+        compile(data, "cursir_new.py", "exec")
+        m = re.search(rb'VERSION = "([^"]+)"', data)
+        newv = m.group(1).decode() if m else None
+        if not newv:
+            return ("fail", None)
+        if vtuple(newv) < vtuple(target):
+            log(f"update: fetched v{newv} < target v{target} — not fully "
+                "uploaded yet")
+            return ("stale", None)
+        log(f"update: verified v{newv} is ready")
+        return ("ok", data)
+    except Exception as e:
+        log(f"update fetch FAILED: {type(e).__name__}: {e}")
+        return ("fail", None)
+
+
+def write_source(data):
+    """Write the verified cursir.py (and refresh the icon)."""
+    import urllib.request
+    try:
+        here = os.path.abspath(__file__)
+        tmp = here + ".new"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, here)
+        log(f"update: wrote {here}")
+        try:
+            with urllib.request.urlopen(RAW_ICON_URL, timeout=15) as r:
+                idata = r.read()
+            if idata:
+                icop = os.path.join(os.path.dirname(here), "cursir.ico")
+                with open(icop, "wb") as f:
+                    f.write(idata)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        log(f"update write FAILED: {type(e).__name__}: {e}")
         return False
 
 
@@ -1377,17 +1430,38 @@ class CurSir(QObject):
             threading.Thread(target=work, daemon=True).start()
             return
 
-        # source bundle: tiny download — run inline so nothing cross-thread
-        # can stall it. Animate the bar with processEvents for visibility.
-        import time as _t
-        for v in (10, 25, 40, 55, 70):
-            self.settings.set_progress(v)
+        # source bundle: VERIFY the new code is fully uploaded before we
+        # touch anything (retry a few times if it hasn't propagated yet),
+        # then swap. Avoids grabbing a half-uploaded file and breaking.
+        self._verify_tries = 0
+        self.settings.set_progress(12)
+        self.settings.set_install_status("Verifying the update is ready, sir…")
+        QTimer.singleShot(0, lambda: self._verify_and_install(latest))
+
+    _VERIFY_MAX = 10           # ~10 tries x 4s = up to ~40s of waiting
+
+    def _verify_and_install(self, latest):
+        status, data = fetch_source(latest)
+        if status == "ok":
+            self.settings.set_progress(70)
             QApplication.processEvents()
-            _t.sleep(0.05)
-        status = apply_source_update()
-        self.settings.set_progress(95)
-        QApplication.processEvents()
-        self._finish_update(status, latest)
+            ok = write_source(data)
+            self.settings.set_progress(95)
+            self._finish_update("ok" if ok else "fail", latest)
+            return
+        if status == "fail":
+            self._finish_update("fail", latest)
+            return
+        # not fully uploaded yet — wait and re-check
+        self._verify_tries += 1
+        if self._verify_tries >= self._VERIFY_MAX:
+            self._finish_update("stale", latest)
+            return
+        self.settings.set_progress(min(60, 12 + self._verify_tries * 5))
+        self.settings.set_install_status(
+            "Waiting for the update to finish uploading, sir… "
+            f"({self._verify_tries})")
+        QTimer.singleShot(4000, lambda: self._verify_and_install(latest))
 
     def _tick_progress(self):
         if self._prog < 90:
