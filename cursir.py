@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QComboBox, QCheckBox, QPushButton,
                                QSystemTrayIcon, QMenu)
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.json")
 ACCENT = "#379ED6"
 REPO_URL = "https://github.com/Verisonder/CurSir"
@@ -45,11 +45,11 @@ RAW_VERSION_URL = \
 RAW_SOURCE_URL = \
     "https://raw.githubusercontent.com/Verisonder/CurSir/main/cursir.py"
 
-# (thinking budget, google-search grounding, screenshot width)
+# (thinking budget, zoom-refine pass, google-search grounding, screenshot width)
 QUALITY = {
-    "fast":     (0,   False, 1280),
-    "balanced": (128, False, 1280),
-    "accurate": (512, True,  1600),
+    "fast":     (0,   False, False, 1280),
+    "balanced": (128, True,  False, 1280),
+    "accurate": (512, True,  True,  1600),
 }
 
 HOTKEY_PRESETS = ["ctrl+win", "ctrl+alt+space", "ctrl+shift+space",
@@ -169,44 +169,11 @@ def set_autostart(enable):
 
 
 # ---------------------------------------------------------------- Gemini ----
-def gemini_locate(key, task, done_list, shot_b64, think, ground):
-    """Ask Gemini where the next UI element is. Returns a dict shaped like
-    {found, box:[t,l,b,r], label, say, last, done} or {} on failure."""
+def gemini_call_json(key, contents, persona, think, ground, max_tokens=400):
+    """POST to Gemini (model fallback, optional grounding). Returns the
+    parsed JSON object the model produced, or {} on failure."""
     import urllib.request
     import urllib.error
-
-    step_no = len(done_list) + 1
-    done_txt = ("Steps ALREADY completed by the user: "
-                + "; ".join(f"{i+1}) {d}" for i, d in enumerate(done_list))
-                if done_list else "This is the FIRST step.")
-
-    persona = (
-        "You are CurSir, an on-screen assistant that controls the user's "
-        "mouse. The user asked you to do or find something in the app shown "
-        "in the screenshot. Work out the ACTUAL correct way to do it using "
-        "what you know and Google Search when useful - do NOT guess from the "
-        "screenshot alone. Then find the SINGLE next UI element the user must "
-        "click, and locate it PRECISELY in the screenshot. Respond with ONLY "
-        "minified JSON, no markdown, no code fences, exactly this shape: "
-        '{"found":true,"box":[100,200,140,320],"label":"element name",'
-        '"say":"short friendly instruction","last":false,"done":false} . '
-        "box is the TIGHT bounding box of just that ONE element (not its "
-        "whole row, toolbar or panel), in the order top, left, bottom, "
-        "right, each normalized 0-1000 of the image height (y) and width "
-        "(x). box MUST contain four plain INTEGERS like [112,204,146,318] - "
-        "NEVER letters or placeholder words. Hug the element's real edges. "
-        "Keep 'say' under 22 words and make it match how the app actually "
-        "works. Set \"last\":true when THIS element is the FINAL step that "
-        "completes the whole task (a simple one-click task is last:true on "
-        "the very first step) - do NOT set last:true if the user will still "
-        "need another step after this one. Set done=true (and make 'say' a "
-        "short wrap-up) only when the task is ALREADY fully complete in the "
-        "screenshot. Set found=false if the needed element isn't on screen "
-        "yet (then 'say' explains what to open or click first).")
-
-    contents = [{"role": "user", "parts": [
-        {"text": f"Task: {task}\nStep number: {step_no}\n{done_txt}"},
-        {"inline_data": {"mime_type": "image/jpeg", "data": shot_b64}}]}]
 
     models = ("gemini-flash-latest", "gemini-3.5-flash",
               "gemini-3.1-flash-lite", "gemini-flash-lite-latest",
@@ -215,7 +182,8 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
     def make_body(model, grounded):
         b = {"contents": contents,
              "systemInstruction": {"parts": [{"text": persona}]},
-             "generationConfig": {"maxOutputTokens": 400, "temperature": 0.6}}
+             "generationConfig": {"maxOutputTokens": max_tokens,
+                                  "temperature": 0.6}}
         if model.startswith("gemini-2.5"):
             b["generationConfig"]["thinkingConfig"] = {"thinkingBudget": think}
         else:
@@ -260,6 +228,96 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
             except Exception:
                 continue
     return {}
+
+
+def gemini_locate(key, task, done_list, shot_b64, think, ground):
+    """First pass: locate the next UI element in the full screenshot."""
+    step_no = len(done_list) + 1
+    done_txt = ("Steps ALREADY completed by the user: "
+                + "; ".join(f"{i+1}) {d}" for i, d in enumerate(done_list))
+                if done_list else "This is the FIRST step.")
+
+    persona = (
+        "You are CurSir, an on-screen assistant that controls the user's "
+        "mouse. The user asked you to do or find something in the app shown "
+        "in the screenshot. Work out the ACTUAL correct way to do it using "
+        "what you know and Google Search when useful - do NOT guess from the "
+        "screenshot alone. Then find the SINGLE next UI element the user must "
+        "click, and locate it PRECISELY in the screenshot. Respond with ONLY "
+        "minified JSON, no markdown, no code fences, exactly this shape: "
+        '{"found":true,"box":[100,200,140,320],"label":"element name",'
+        '"say":"short friendly instruction","last":false,"done":false} . '
+        "box is the TIGHT bounding box of just that ONE element (not its "
+        "whole row, toolbar or panel), in the order top, left, bottom, "
+        "right, each normalized 0-1000 of the image height (y) and width "
+        "(x). box MUST contain four plain INTEGERS like [112,204,146,318] - "
+        "NEVER letters or placeholder words. Hug the element's real edges. "
+        "Keep 'say' under 22 words and make it match how the app actually "
+        "works. Set \"last\":true when THIS element is the FINAL step that "
+        "completes the whole task (a simple one-click task is last:true on "
+        "the very first step) - do NOT set last:true if the user will still "
+        "need another step after this one. Set done=true (and make 'say' a "
+        "short wrap-up) only when the task is ALREADY fully complete in the "
+        "screenshot. Set found=false if the needed element isn't on screen "
+        "yet (then 'say' explains what to open or click first).")
+
+    contents = [{"role": "user", "parts": [
+        {"text": f"Task: {task}\nStep number: {step_no}\n{done_txt}"},
+        {"inline_data": {"mime_type": "image/jpeg", "data": shot_b64}}]}]
+    return gemini_call_json(key, contents, persona, think, ground)
+
+
+def zoom_refine(key, label, box, img, think):
+    """Second pass: crop ~3x around the first box, zoom in, re-ask
+    (image-only, ungrounded) for a tight box in the crop. Returns refined
+    (nx, ny) normalized 0-1000 of the FULL image, or None to keep the first
+    pass. Runs on the worker thread (QImage ops are thread-safe)."""
+    if img is None or img.isNull():
+        return None
+    W, H = img.width(), img.height()
+    bt, bl, bb, br = [float(v) for v in box[:4]]
+    x0, x1 = bl / 1000.0 * W, br / 1000.0 * W
+    y0, y1 = bt / 1000.0 * H, bb / 1000.0 * H
+    bw, bh = max(20.0, x1 - x0), max(16.0, y1 - y0)
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    rw = min(W, max(bw * 3.0, 260.0))
+    rh = min(H, max(bh * 3.0, 200.0))
+    rx = max(0, min(int(cx - rw / 2), W - int(rw)))
+    ry = max(0, min(int(cy - rh / 2), H - int(rh)))
+    rw, rh = int(rw), int(rh)
+    crop = img.copy(rx, ry, rw, rh)
+    if crop.width() < 640:
+        crop = crop.scaledToWidth(640, Qt.SmoothTransformation)
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.WriteOnly)
+    crop.save(buf, "JPEG", 90)
+    buf.close()
+    b64 = base64.b64encode(bytes(ba)).decode()
+    persona2 = (
+        "This is a zoomed-in crop of a screenshot. Locate the element "
+        f"described as: {label!r}. Respond with ONLY minified JSON: "
+        '{"found":true,"box":[112,204,146,318]} where box is the TIGHT '
+        "bounding box [top,left,bottom,right], each an INTEGER normalized "
+        "0-1000 of THIS image's height/width. If it isn't in this crop, "
+        'reply {"found":false}.')
+    contents2 = [{"role": "user", "parts": [
+        {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]
+    d2 = gemini_call_json(key, contents2, persona2, think, False,
+                          max_tokens=768)
+    if not d2 or not d2.get("found") or not d2.get("box"):
+        return None
+    try:
+        zt, zl, zb, zr = [float(v) for v in d2["box"][:4]]
+    except Exception:
+        return None
+    czx = (zl + zr) / 2.0 / 1000.0
+    czy = (zt + zb) / 2.0 / 1000.0
+    fx = (rx + czx * rw) / W * 1000.0
+    fy = (ry + czy * rh) / H * 1000.0
+    if not (0 <= fx <= 1000 and 0 <= fy <= 1000):
+        return None
+    return fx, fy
 
 
 # ------------------------------------------------------------- overlays ----
@@ -504,12 +562,27 @@ class Hotkey(QObject):
 class Vision(QObject):
     done = Signal(dict)
 
-    def run(self, key, task, done_list, shot, think, ground):
+    def run(self, key, task, done_list, shot, think, ground, do_zoom, img):
         import threading
 
         def work():
             res = gemini_locate(key, task, done_list, shot, think, ground)
-            self.done.emit(res or {})
+            res = res or {}
+            # zoom-refine pass — same trick that makes the cat's guide precise
+            try:
+                if (res.get("found") and not res.get("done")
+                        and res.get("box") and do_zoom):
+                    bt, bl, bb, br = [float(v) for v in res["box"][:4]]
+                    area = max(0.0, bb - bt) * max(0.0, br - bl) / 1e6
+                    if 0.0015 <= area <= 0.40:
+                        ref = zoom_refine(key, str(res.get("label")
+                                          or "the element"),
+                                          res["box"], img, think)
+                        if ref is not None:
+                            res["_center"] = ref     # (nx, ny) 0-1000, refined
+            except Exception:
+                pass
+            self.done.emit(res)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -735,19 +808,19 @@ class CurSir(QObject):
             self.box.thinking("no Gemini key set — open Settings 😿")
             return
         self.busy = True
-        think, ground, shot_w = QUALITY.get(self.cfg.get("quality"),
-                                            QUALITY["balanced"])
+        think, do_zoom, ground, shot_w = QUALITY.get(
+            self.cfg.get("quality"), QUALITY["balanced"])
         self.box.thinking("looking… 👀" if first else "checking next… 👀")
         self.glow.stop()
         QApplication.processEvents()
-        shot, geom = self._grab(shot_w)
+        shot, geom, img = self._grab(shot_w)
         self._geom = geom
         if not shot:
             self.box.thinking("couldn't grab the screen 😿")
             self.busy = False
             return
         self.vision.run(self.cfg["gemini_key"], self.task, self.done_list,
-                        shot, think, ground)
+                        shot, think, ground, do_zoom, img)
 
     def _on_vision(self, res):
         self.busy = False
@@ -769,9 +842,16 @@ class CurSir(QObject):
         except Exception:
             self.box.thinking("got a bad location — try rephrasing 😿")
             return
+        # prefer the zoom-refined centre when the second pass produced one
+        if isinstance(res.get("_center"), (list, tuple)) \
+                and len(res["_center"]) == 2:
+            nx, ny = res["_center"]
+        else:
+            nx = (left + right) / 2.0
+            ny = (top + bottom) / 2.0
         g = self._geom
-        cx = g.x() + ((left + right) / 2.0 / 1000.0) * g.width()
-        cy = g.y() + ((top + bottom) / 2.0 / 1000.0) * g.height()
+        cx = g.x() + (nx / 1000.0) * g.width()
+        cy = g.y() + (ny / 1000.0) * g.height()
         self.target = (int(cx), int(cy))
         self._last_label = str(res.get("label", "that")).strip() or "that"
         self._last = bool(res.get("last"))
@@ -823,14 +903,15 @@ class CurSir(QObject):
             pm = scr.grabWindow(0)
             if pm.width() > maxw:
                 pm = pm.scaledToWidth(maxw, Qt.SmoothTransformation)
+            img = pm.toImage()          # kept for the zoom-refine crop
             ba = QByteArray()
             buf = QBuffer(ba)
             buf.open(QIODevice.WriteOnly)
             pm.save(buf, "JPEG", 88)
             buf.close()
-            return base64.b64encode(bytes(ba)).decode(), geom
+            return base64.b64encode(bytes(ba)).decode(), geom, img
         except Exception:
-            return None, None
+            return None, None, None
 
     def _os_click(self):
         try:
