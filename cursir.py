@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -1518,7 +1518,7 @@ class CurSir(QObject):
             self.offer_update(self._pending_update)
 
     _VERIFY_MAX = 10           # ~10 tries x 4s = up to ~40s of waiting
-    _INSTALL_TIMEOUT_MS = 75000    # hard watchdog: give up after ~75s
+    _INSTALL_TIMEOUT_MS = 60000    # hard watchdog: give up after 60s
 
     def offer_update(self, latest):
         if self._updating:
