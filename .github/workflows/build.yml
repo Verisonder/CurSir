@@ -1,0 +1,43 @@
+name: Build CurSir.exe
+
+# Runs when you push a version tag like v0.1.0, and can also be run by hand
+# from the Actions tab.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pyinstaller PySide6 pynput
+
+      - name: Build the exe
+        run: pyinstaller --noconfirm --onefile --windowed --name CurSir cursir.py
+
+      - name: Upload exe as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CurSir
+          path: dist/CurSir.exe
+
+      - name: Publish exe to Releases (only for tag pushes)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/CurSir.exe
+          generate_release_notes: true
