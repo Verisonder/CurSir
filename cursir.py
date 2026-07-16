@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.1.9"
+VERSION = "0.2.0"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -789,22 +789,29 @@ class Settings(QWidget):
         self.toggle_btn.clicked.connect(self._toggle)
 
         self.upd_status = QLabel(f"CurSir v{VERSION}")
-        check_btn = QPushButton("Check for updates")
-        check_btn.clicked.connect(self._check)
-        shortcut_btn = QPushButton("Add desktop shortcut")
-        shortcut_btn.clicked.connect(self._shortcut)
+        # install button: hidden until an update is found
+        self.install_btn = QPushButton("Install update")
+        self.install_btn.setMinimumHeight(30)
+        self.install_btn.clicked.connect(self._install)
+        self.install_btn.hide()
 
-        save_btn = QPushButton("Save")
-        save_btn.clicked.connect(self._save)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.hide)
+        self.check_btn = QPushButton("Check for updates")
+        self.check_btn.clicked.connect(self._check)
+        self.shortcut_btn = QPushButton("Add desktop shortcut")
+        self.shortcut_btn.clicked.connect(self._shortcut)
+
+        self.save_btn = QPushButton("Save")
+        self.save_btn.clicked.connect(self._save)
+        self.save_btn.setEnabled(False)          # only when something changes
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.hide)
 
         row = QHBoxLayout()
-        row.addWidget(check_btn)
-        row.addWidget(shortcut_btn)
+        row.addWidget(self.check_btn)
+        row.addWidget(self.shortcut_btn)
         row.addStretch(1)
-        row.addWidget(save_btn)
-        row.addWidget(close_btn)
+        row.addWidget(self.save_btn)
+        row.addWidget(self.close_btn)
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.state_lbl)
@@ -812,16 +819,33 @@ class Settings(QWidget):
         lay.addSpacing(6)
         lay.addLayout(form)
         lay.addWidget(self.upd_status)
+        lay.addWidget(self.install_btn)
         lay.addLayout(row)
 
+        # mark the form dirty (enable Save) whenever the user edits anything
+        self._loading = False
+        self.key_edit.textChanged.connect(self._mark_dirty)
+        self.hotkey_edit.currentTextChanged.connect(self._mark_dirty)
+        self.quality_edit.currentTextChanged.connect(self._mark_dirty)
+        self.startlaunch.toggled.connect(self._mark_dirty)
+        self.autostart.toggled.connect(self._mark_dirty)
+        self.autoupd.toggled.connect(self._mark_dirty)
+
     def load_from(self, cfg):
+        self._loading = True
         self.key_edit.setText(cfg.get("gemini_key", ""))
         self.hotkey_edit.setCurrentText(cfg.get("hotkey", "ctrl+win"))
         self.quality_edit.setCurrentText(cfg.get("quality", "balanced"))
         self.autoupd.setChecked(bool(cfg.get("auto_update", True)))
         self.autostart.setChecked(bool(cfg.get("start_with_windows", False)))
         self.startlaunch.setChecked(bool(cfg.get("start_on_launch", False)))
+        self._loading = False
+        self.save_btn.setEnabled(False)
         self.refresh_state(getattr(self.ctrl, "armed", False))
+
+    def _mark_dirty(self, *_):
+        if not self._loading:
+            self.save_btn.setEnabled(True)
 
     def refresh_state(self, armed):
         self.state_lbl.setText("CurSir is running" if armed
@@ -840,21 +864,43 @@ class Settings(QWidget):
             start_with_windows=self.autostart.isChecked(),
             start_on_launch=self.startlaunch.isChecked())
         self.upd_status.setText("Saved ✓")
+        self.save_btn.setEnabled(False)
 
     def _check(self):
-        self.upd_status.setText("checking…")
+        self.upd_status.setText("Checking for updates…")
+        self.check_btn.setEnabled(False)
         QApplication.processEvents()
         latest = update_available()
+        self.check_btn.setEnabled(True)
         if latest:
-            self.upd_status.setText(f"Update available: v{latest}")
-            self.ctrl.offer_update(latest)
+            self.show_update(latest)      # offer to install, don't auto-run
         else:
-            self.upd_status.setText(f"Up to date (v{VERSION})")
+            self.install_btn.hide()
+            self.upd_status.setText(f"You're up to date, sir (v{VERSION}).")
+
+    def show_update(self, latest):
+        """An update exists — invite the user to install it."""
+        self._pending = latest
+        self.upd_status.setText(f"Update v{latest} is available, sir.")
+        self.install_btn.setText(f"Install v{latest}")
+        self.install_btn.setEnabled(True)
+        self.install_btn.show()
+
+    def _install(self):
+        self.upd_status.setText("Installing…")
+        self.install_btn.setEnabled(False)
+        self.check_btn.setEnabled(False)
+        self.save_btn.setEnabled(False)
+        QApplication.processEvents()
+        self.ctrl.install_update()
+
+    def set_install_status(self, text):
+        self.upd_status.setText(text)
 
     def _shortcut(self):
         ok = create_desktop_shortcut()
-        self.upd_status.setText("Desktop shortcut added ✓" if ok
-                                else "Couldn't create shortcut")
+        self.upd_status.setText("Desktop shortcut added." if ok
+                                else "Couldn't create the shortcut, sir.")
 
 
 # ----------------------------------------------------------- controller ----
@@ -873,6 +919,7 @@ class CurSir(QObject):
         self.target = None
         self.busy = False
         self._updating = False
+        self._pending_update = None
         self._geom = None
         self._last = False
         self._last_label = "that"
@@ -958,6 +1005,8 @@ class CurSir(QObject):
 
     def open_settings(self):
         self.settings.load_from(self.cfg)
+        if self._pending_update:
+            self.settings.show_update(self._pending_update)
         self.settings.show()
         self.settings.raise_()
         self.settings.activateWindow()
@@ -981,21 +1030,35 @@ class CurSir(QObject):
         def work():
             latest = update_available()
             if latest:
-                QTimer.singleShot(0, lambda: self.offer_update(latest))
+                QTimer.singleShot(0, lambda: self._present_update(latest))
         threading.Thread(target=work, daemon=True).start()
 
     def _manual_update_check(self):
         latest = update_available()
         if latest:
-            self.offer_update(latest)
+            self._present_update(latest)
         else:
-            self.tray.showMessage("CurSir", f"Up to date (v{VERSION})")
+            self.tray.showMessage("CurSir", f"You're up to date (v{VERSION}).")
+
+    def _present_update(self, latest):
+        """Tell the user an update exists and let them choose to install."""
+        self._pending_update = latest
+        self.tray.showMessage(
+            "CurSir", f"Update v{latest} is available, sir — "
+            "open CurSir to install it.")
+        if self.settings.isVisible():
+            self.settings.show_update(latest)
+
+    def install_update(self):
+        if self._pending_update:
+            self.offer_update(self._pending_update)
 
     def offer_update(self, latest):
         if self._updating:
             return
         self._updating = True
         self.tray.showMessage("CurSir", f"Installing v{latest}, sir…")
+        self.settings.set_install_status(f"Installing v{latest}, sir…")
         import threading
 
         def work():
@@ -1009,13 +1072,16 @@ class CurSir(QObject):
 
     def _after_update(self, ok, latest):
         if ok:
-            self.tray.showMessage("CurSir", "Update ready — restarting…")
-            # give the tray message a beat, then exit so the swap can happen
-            QTimer.singleShot(900, lambda: (restart_app()
-                                            if not getattr(sys, "frozen", False)
-                                            else os._exit(0)))
+            self.tray.showMessage("CurSir", "Update installed — restarting…")
+            self.settings.set_install_status("Installed — restarting CurSir…")
+            # give the message a beat, then exit so the swap can complete
+            QTimer.singleShot(1100, lambda: (restart_app()
+                                             if not getattr(sys, "frozen", False)
+                                             else os._exit(0)))
         else:
             self._updating = False
+            self.settings.set_install_status(
+                "Update failed, sir — opening the download page.")
             self.tray.showMessage(
                 "CurSir", "Update failed, sir — opening the download page")
             webbrowser.open(REPO_URL + "/releases/latest")
