@@ -51,8 +51,8 @@ jobs:
           [Files]
           Source: "CurSir\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
           [Icons]
-          Name: "{userdesktop}\CurSir"; Filename: "{app}\pythonw.exe"; Parameters: """{app}\cursir.py"""; IconFilename: "{app}\cursir.ico"; WorkingDir: "{app}"
-          Name: "{userprograms}\CurSir"; Filename: "{app}\pythonw.exe"; Parameters: """{app}\cursir.py"""; IconFilename: "{app}\cursir.ico"; WorkingDir: "{app}"
+          Name: "{userdesktop}\CurSir"; Filename: "{app}\pythonw.exe"; Parameters: """{app}\cursir.py"" --settings"; IconFilename: "{app}\cursir.ico"; WorkingDir: "{app}"
+          Name: "{userprograms}\CurSir"; Filename: "{app}\pythonw.exe"; Parameters: """{app}\cursir.py"" --settings"; IconFilename: "{app}\cursir.ico"; WorkingDir: "{app}"
           [Run]
           Filename: "{app}\pythonw.exe"; Parameters: """{app}\cursir.py"""; Flags: nowait postinstall skipifsilent
           "@
