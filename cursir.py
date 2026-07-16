@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.3.7"
+VERSION = "0.3.8"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -1541,6 +1541,10 @@ class CurSir(QObject):
             self.busy = False
             return
         self.box.thinking("One moment, sir…" if first else "Allow me a moment, sir…")
+        # screenshot is taken — bring the glow back so it keeps pulsing on the
+        # cursor while CurSir thinks, instead of going dark
+        pos = QCursor.pos()
+        self.glow.point_at(pos.x(), pos.y(), follow=True)
         self.vision.run(self.cfg["gemini_key"], self.task, self.done_list,
                         shot, think, ground, do_zoom, img,
                         apps=list(self.app_list().keys()))
