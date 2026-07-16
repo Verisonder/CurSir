@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -79,7 +79,7 @@ HOTKEY_PRESETS = ["ctrl+win", "ctrl+alt+space", "ctrl+shift+space",
 DEFAULTS = {"gemini_key": "", "quality": "balanced",
             "hotkey": "ctrl+win", "auto_update": True,
             "start_with_windows": False, "start_on_launch": False,
-            "auto_mode": False}
+            "auto_mode": False, "browser": "system default"}
 
 
 def load_cfg():
@@ -178,6 +178,43 @@ def apply_source_update():
     except Exception as e:
         log(f"update FAILED: {type(e).__name__}: {e}")
         return "fail"
+
+
+BROWSER_NAMES = {"chrome", "google chrome", "msedge", "edge",
+                 "microsoft edge", "firefox", "brave", "opera", "browser",
+                 "web browser", "internet", "vivaldi"}
+BROWSER_MAP = {"chrome": "chrome", "edge": "msedge", "firefox": "firefox",
+               "brave": "brave", "opera": "opera", "vivaldi": "vivaldi"}
+
+
+def default_browser_exe():
+    """The user's actual default browser executable, via the Windows registry."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import winreg
+        import shlex
+        key = (r"Software\Microsoft\Windows\Shell\Associations"
+               r"\UrlAssociations\https\UserChoice")
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            progid, _ = winreg.QueryValueEx(k, "ProgId")
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT,
+                            progid + r"\shell\open\command") as k:
+            cmd, _ = winreg.QueryValueEx(k, "")
+        exe = shlex.split(cmd)[0] if cmd else None
+        log(f"default browser: {exe}")
+        return exe
+    except Exception as e:
+        log(f"default browser detect failed: {e}")
+        return None
+
+
+def resolve_browser(pref):
+    """Turn a preference ('system default' or a name) into a launch target."""
+    pref = (pref or "system default").lower()
+    if pref == "system default":
+        return default_browser_exe() or "msedge"
+    return BROWSER_MAP.get(pref, pref)
 
 
 def launch_app(name):
@@ -887,6 +924,10 @@ class Settings(QWidget):
         self.quality_edit = QComboBox()
         self.quality_edit.addItems(["fast", "balanced", "accurate"])
 
+        self.browser_edit = QComboBox()
+        self.browser_edit.addItems(["system default", "chrome", "edge",
+                                    "firefox", "brave", "opera", "vivaldi"])
+
         self.autoupd = QCheckBox("Check for updates automatically")
         self.autostart = QCheckBox("Start CurSir when Windows starts")
         self.startlaunch = QCheckBox("Start CurSir automatically when I open it")
@@ -895,6 +936,7 @@ class Settings(QWidget):
         form.addRow("Gemini API key", self.key_edit)
         form.addRow("Hotkey", self.hotkey_edit)
         form.addRow("Quality", self.quality_edit)
+        form.addRow("Browser", self.browser_edit)
         form.addRow("", self.automode)
         form.addRow("", self.startlaunch)
         form.addRow("", self.autostart)
@@ -958,6 +1000,7 @@ class Settings(QWidget):
         self.key_edit.textChanged.connect(self._mark_dirty)
         self.hotkey_edit.currentTextChanged.connect(self._mark_dirty)
         self.quality_edit.currentTextChanged.connect(self._mark_dirty)
+        self.browser_edit.currentTextChanged.connect(self._mark_dirty)
         self.startlaunch.toggled.connect(self._mark_dirty)
         self.autostart.toggled.connect(self._mark_dirty)
         self.autoupd.toggled.connect(self._mark_dirty)
@@ -968,6 +1011,7 @@ class Settings(QWidget):
         self.key_edit.setText(cfg.get("gemini_key", ""))
         self.hotkey_edit.setCurrentText(cfg.get("hotkey", "ctrl+win"))
         self.quality_edit.setCurrentText(cfg.get("quality", "balanced"))
+        self.browser_edit.setCurrentText(cfg.get("browser", "system default"))
         self.autoupd.setChecked(bool(cfg.get("auto_update", True)))
         self.autostart.setChecked(bool(cfg.get("start_with_windows", False)))
         self.startlaunch.setChecked(bool(cfg.get("start_on_launch", False)))
@@ -993,6 +1037,7 @@ class Settings(QWidget):
             key=self.key_edit.text().strip(),
             hotkey=self.hotkey_edit.currentText().strip() or "ctrl+win",
             quality=self.quality_edit.currentText(),
+            browser=self.browser_edit.currentText(),
             auto_update=self.autoupd.isChecked(),
             start_with_windows=self.autostart.isChecked(),
             start_on_launch=self.startlaunch.isChecked(),
@@ -1173,11 +1218,12 @@ class CurSir(QObject):
         self.settings.raise_()
         self.settings.activateWindow()
 
-    def apply_settings(self, key, hotkey, quality, auto_update,
+    def apply_settings(self, key, hotkey, quality, browser, auto_update,
                        start_with_windows, start_on_launch, auto_mode):
         old_hotkey = self.cfg.get("hotkey")
         self.cfg.update({"gemini_key": key, "hotkey": hotkey,
-                         "quality": quality, "auto_update": auto_update,
+                         "quality": quality, "browser": browser,
+                         "auto_update": auto_update,
                          "start_with_windows": start_with_windows,
                          "start_on_launch": start_on_launch,
                          "auto_mode": auto_mode})
@@ -1428,6 +1474,9 @@ class CurSir(QObject):
     def _do_launch(self):
         name = getattr(self, "_pending_launch", "")
         self._pending_launch = ""
+        if name.lower() in BROWSER_NAMES or "browser" in name.lower():
+            name = resolve_browser(self.cfg.get("browser", "system default"))
+            log(f"browser launch -> {name}")
         launch_app(name)
         self.done_list.append(f"launched {name}")
         if self._last:
