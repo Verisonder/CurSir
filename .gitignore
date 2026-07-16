@@ -1,0 +1,8 @@
+# never commit your Gemini key
+.cursir.json
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
