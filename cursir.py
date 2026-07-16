@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -935,6 +935,10 @@ class Settings(QWidget):
 
 # ----------------------------------------------------------- controller ----
 class CurSir(QObject):
+    # thread-safe hand-offs from worker threads back to the UI thread
+    _sig_update_found = Signal(str)
+    _sig_update_done = Signal(bool, str)
+
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -943,6 +947,8 @@ class CurSir(QObject):
         self.hotkey = Hotkey(cfg.get("hotkey", "ctrl+win"))
         self.vision = Vision()
         self.settings = Settings(self)
+        self._sig_update_found.connect(self._present_update)
+        self._sig_update_done.connect(self._after_update)
 
         self.task = ""
         self.done_list = []
@@ -1060,7 +1066,7 @@ class CurSir(QObject):
         def work():
             latest = update_available()
             if latest:
-                QTimer.singleShot(0, lambda: self._present_update(latest))
+                self._sig_update_found.emit(latest)
         threading.Thread(target=work, daemon=True).start()
 
     def _manual_update_check(self):
@@ -1102,7 +1108,7 @@ class CurSir(QObject):
                 ok = apply_exe_update()          # download new exe + swap helper
             else:
                 ok = apply_source_update()       # replace cursir.py
-            QTimer.singleShot(0, lambda: self._after_update(ok, latest))
+            self._sig_update_done.emit(ok, latest)
 
         threading.Thread(target=work, daemon=True).start()
 
