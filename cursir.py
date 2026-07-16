@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -139,26 +139,32 @@ def apply_source_update():
         return False
     import urllib.request
     try:
+        log("update: downloading cursir.py")
         with urllib.request.urlopen(RAW_SOURCE_URL, timeout=20) as r:
             data = r.read()
+        log(f"update: downloaded {len(data)} bytes; compiling")
         compile(data, "cursir_new.py", "exec")     # trust nothing that won't run
         here = os.path.abspath(__file__)
         tmp = here + ".new"
         with open(tmp, "wb") as f:
             f.write(data)
         os.replace(tmp, here)
+        log(f"update: replaced {here}")
         # also refresh the icon so the logo updates without a reinstall
         try:
-            with urllib.request.urlopen(RAW_ICON_URL, timeout=20) as r:
+            with urllib.request.urlopen(RAW_ICON_URL, timeout=15) as r:
                 idata = r.read()
             if idata:
                 icop = os.path.join(os.path.dirname(here), "cursir.ico")
                 with open(icop, "wb") as f:
                     f.write(idata)
-        except Exception:
-            pass
+            log("update: icon refreshed")
+        except Exception as e:
+            log(f"update: icon refresh skipped ({e})")
+        log("update: SUCCESS")
         return True
-    except Exception:
+    except Exception as e:
+        log(f"update FAILED: {type(e).__name__}: {e}")
         return False
 
 
@@ -170,9 +176,10 @@ def restart_app():
             exe = sys.executable
             pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
             launcher = pyw if os.path.exists(pyw) else exe
+            log(f"restart: launching {launcher} {os.path.abspath(__file__)}")
             subprocess.Popen([launcher, os.path.abspath(__file__)])
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"restart FAILED: {e}")
     os._exit(0)
 
 
@@ -1143,24 +1150,36 @@ class CurSir(QObject):
         if self._updating:
             return
         self._updating = True
+        log(f"offer_update: installing v{latest} (frozen={getattr(sys,'frozen',False)})")
         self.tray.showMessage("CurSir", f"Installing v{latest}, sir…")
         self.settings.begin_install()
-        # smooth progress up to ~90% while the (fast) download/write happens;
-        # jumps to 100% the moment it's actually done
-        self._prog = 0
-        self._prog_timer = QTimer(self)
-        self._prog_timer.timeout.connect(self._tick_progress)
-        self._prog_timer.start(40)
-        import threading
 
-        def work():
-            if getattr(sys, "frozen", False):
-                ok = apply_exe_update()          # download new exe + swap helper
-            else:
-                ok = apply_source_update()       # replace cursir.py
-            self._sig_update_done.emit(ok, latest)
+        if getattr(sys, "frozen", False):
+            # frozen .exe: 47MB download — keep it off the UI thread
+            self._prog = 0
+            self._prog_timer = QTimer(self)
+            self._prog_timer.timeout.connect(self._tick_progress)
+            self._prog_timer.start(40)
+            import threading
 
-        threading.Thread(target=work, daemon=True).start()
+            def work():
+                ok = apply_exe_update()
+                self._sig_update_done.emit(ok, latest)
+
+            threading.Thread(target=work, daemon=True).start()
+            return
+
+        # source bundle: tiny download — run inline so nothing cross-thread
+        # can stall it. Animate the bar with processEvents for visibility.
+        import time as _t
+        for v in (10, 25, 40, 55, 70):
+            self.settings.set_progress(v)
+            QApplication.processEvents()
+            _t.sleep(0.05)
+        ok = apply_source_update()
+        self.settings.set_progress(90)
+        QApplication.processEvents()
+        self._after_update(ok, latest)
 
     def _tick_progress(self):
         if self._prog < 90:
@@ -1168,6 +1187,7 @@ class CurSir(QObject):
             self.settings.set_progress(self._prog)
 
     def _after_update(self, ok, latest):
+        log(f"after_update: ok={ok}")
         try:
             self._prog_timer.stop()
         except Exception:
@@ -1176,10 +1196,9 @@ class CurSir(QObject):
             self.settings.set_progress(100)
             self.tray.showMessage("CurSir", "Update installed — restarting…")
             self.settings.set_install_status("Installed — restarting CurSir…")
+            log("after_update: scheduling restart")
             # let the full bar show for a beat, then exit so the swap completes
-            QTimer.singleShot(1100, lambda: (restart_app()
-                                             if not getattr(sys, "frozen", False)
-                                             else os._exit(0)))
+            QTimer.singleShot(1100, self._do_restart)
         else:
             self._updating = False
             self.settings.end_install(False)
@@ -1188,6 +1207,13 @@ class CurSir(QObject):
             self.tray.showMessage(
                 "CurSir", "Update failed, sir — opening the download page")
             webbrowser.open(REPO_URL + "/releases/latest")
+
+    def _do_restart(self):
+        log("restarting now")
+        if getattr(sys, "frozen", False):
+            os._exit(0)
+        else:
+            restart_app()
 
     # -- flow ---------------------------------------------------------------
     def _trigger(self):
