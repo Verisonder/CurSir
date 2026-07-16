@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -362,22 +362,25 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
         "user must click, and locate it PRECISELY in the screenshot. Respond "
         "with ONLY minified JSON, no markdown, no code fences, exactly this "
         'shape: {"found":true,"box":[100,200,140,320],"label":"element name",'
-        '"say":"instruction","last":false,"done":false} . '
+        '"say":"instruction","last":false,"done":false,"double":false} . '
         "box is the TIGHT bounding box of just that ONE element (not its "
         "whole row, toolbar or panel), in the order top, left, bottom, "
         "right, each normalized 0-1000 of the image height (y) and width "
         "(x). box MUST contain four plain INTEGERS like [112,204,146,318] - "
         "NEVER letters or placeholder words. Hug the element's real edges. "
-        "Write 'say' in the voice of a polite English butler addressing the "
-        "user as 'sir' (e.g. 'Kindly click the Settings icon, sir.'). Keep "
-        "it under 22 words, no emoji, and match how the app actually works. "
-        "Set \"last\":true when THIS element is the FINAL step that "
-        "completes the whole task (a simple one-click task is last:true on "
-        "the very first step) - do NOT set last:true if the user will still "
-        "need another step after this one. Set done=true (and make 'say' a "
-        "short wrap-up) only when the task is ALREADY fully complete in the "
-        "screenshot. Set found=false if the needed element isn't on screen "
-        "yet (then 'say' explains what to open or click first).")
+        "Set \"double\":true ONLY when the element needs a double-click to "
+        "open (a desktop icon, or a file/folder in File Explorer); otherwise "
+        "false. Write 'say' in the voice of a polite English butler "
+        "addressing the user as 'sir' (e.g. 'Kindly click the Settings icon, "
+        "sir.'). Keep it under 22 words, no emoji, and match how the app "
+        "actually works. Set \"last\":true when THIS element is the FINAL "
+        "step that completes the whole task (a simple one-click task is "
+        "last:true on the very first step) - do NOT set last:true if the "
+        "user will still need another step after this one. Set done=true "
+        "(and make 'say' a short wrap-up) only when the task is ALREADY "
+        "fully complete in the screenshot. Set found=false if the needed "
+        "element isn't on screen yet (then 'say' explains what to open "
+        "or click first).")
 
     contents = [{"role": "user", "parts": [
         {"text": f"Task: {task}\nStep number: {step_no}\n{done_txt}"},
@@ -1090,6 +1093,7 @@ class CurSir(QObject):
                   f"screen=({int(cx)},{int(cy)})")
         self._last_label = str(res.get("label", "that")).strip() or "that"
         self._last = bool(res.get("last"))
+        self._double = bool(res.get("double"))
         QCursor.setPos(self.target[0], self.target[1])
         self.glow.point_at(*self.target)
         self.box.step_at(self.target[0], self.target[1], say)
@@ -1098,8 +1102,20 @@ class CurSir(QObject):
         if not self.target:
             return
         x, y = self.target
+        # drop our own window focus + overlays FIRST, so the click lands on
+        # the target on the first try instead of just activating our box
+        self.box.hide()
+        self.glow.stop()
+        QApplication.processEvents()
+        # let Windows settle focus, then move + click
+        QTimer.singleShot(70, self._do_click)
+
+    def _do_click(self):
+        if not self.target:
+            return
+        x, y = self.target
         QCursor.setPos(x, y)
-        self._os_click()
+        self._os_click(double=getattr(self, "_double", False))
         self.done_list.append(self._last_label)
         if self._last:
             self.glow.stop()
@@ -1158,18 +1174,20 @@ class CurSir(QObject):
         except Exception:
             return None, None, None
 
-    def _os_click(self):
+    def _os_click(self, double=False):
+        n = 2 if double else 1
         try:
             from pynput.mouse import Button, Controller
-            Controller().click(Button.left, 1)
+            Controller().click(Button.left, n)
             return
         except Exception:
             pass
         if platform.system() == "Windows":
             try:
                 import ctypes
-                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
-                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
+                for _ in range(n):
+                    ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
+                    ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
             except Exception:
                 pass
 
