@@ -36,8 +36,25 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QComboBox, QCheckBox, QPushButton,
                                QSystemTrayIcon, QMenu)
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
+LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
+
+
+def log(msg):
+    """Print (when a console exists) AND append to ~/.cursir.log, so errors
+    are visible even from the windowed .exe which has no console."""
+    line = f"[CurSir] {msg}"
+    if DEBUG:
+        try:
+            print(line)
+        except Exception:
+            pass
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.json")
 ACCENT = "#379ED6"
 REPO_URL = "https://github.com/Verisonder/CurSir"
@@ -142,6 +159,50 @@ def restart_app():
     except Exception:
         pass
     os._exit(0)
+
+
+EXE_ASSET_URL = \
+    "https://github.com/Verisonder/CurSir/releases/latest/download/CurSir.exe"
+
+
+def apply_exe_update():
+    """Frozen .exe self-update: download the new CurSir.exe, then hand off to
+    a tiny batch that waits for us to exit, swaps the file, and relaunches.
+    Returns True if the swap was launched (caller must then exit)."""
+    if platform.system() != "Windows" or not getattr(sys, "frozen", False):
+        return False
+    import urllib.request
+    import tempfile
+    exe = sys.executable
+    folder = os.path.dirname(exe)
+    newexe = os.path.join(folder, "CurSir.new.exe")
+    try:
+        with urllib.request.urlopen(EXE_ASSET_URL, timeout=120) as r:
+            data = r.read()
+        if len(data) < 1_000_000:          # sanity: a real exe is many MB
+            return False
+        with open(newexe, "wb") as f:
+            f.write(data)
+    except Exception:
+        return False
+    bat = os.path.join(tempfile.gettempdir(), "cursir_update.bat")
+    script = (
+        "@echo off\r\n"
+        "timeout /t 2 /nobreak >nul\r\n"
+        ":wait\r\n"
+        f'del "{exe}" >nul 2>&1\r\n'
+        f'if exist "{exe}" (timeout /t 1 /nobreak >nul & goto wait)\r\n'
+        f'move /y "{newexe}" "{exe}" >nul\r\n'
+        f'start "" "{exe}"\r\n'
+        'del "%~f0" >nul 2>&1\r\n')
+    try:
+        with open(bat, "w") as f:
+            f.write(script)
+        subprocess.Popen(["cmd", "/c", bat],
+                         creationflags=0x08000000)   # detached, no window
+        return True
+    except Exception:
+        return False
 
 
 def set_autostart(enable):
@@ -275,7 +336,7 @@ def gemini_call_json(key, contents, persona, think, ground, max_tokens=400):
                     last_err = f"{m}: {type(e).__name__}: {e}"
                     break
     if DEBUG:
-        print(f"[CurSir] gemini call FAILED — last error: {last_err}")
+        log(f"gemini call FAILED — last error: {last_err}")
     return {}
 
 
@@ -643,7 +704,7 @@ class Vision(QObject):
             res = gemini_locate(key, task, done_list, shot, think, ground)
             res = res or {}
             if DEBUG:
-                print(f"[CurSir] first-pass: found={res.get('found')} "
+                log(f"first-pass: found={res.get('found')} "
                       f"box={res.get('box')} label={res.get('label')!r} "
                       f"say={res.get('say')!r}")
             # zoom-refine pass — same trick that makes the cat's guide precise
@@ -657,15 +718,15 @@ class Vision(QObject):
                                           or "the element"),
                                           res["box"], img, think)
                         if DEBUG:
-                            print(f"[CurSir] zoom-refine (area={area:.4f}): "
+                            log(f"zoom-refine (area={area:.4f}): "
                                   f"{ref}")
                         if ref is not None:
                             res["_center"] = ref     # (nx, ny) 0-1000, refined
                     elif DEBUG:
-                        print(f"[CurSir] zoom skipped (area={area:.4f})")
+                        log(f"zoom skipped (area={area:.4f})")
             except Exception as e:
                 if DEBUG:
-                    print(f"[CurSir] zoom error: {e}")
+                    log(f"zoom error: {e}")
             self.done.emit(res)
 
         threading.Thread(target=work, daemon=True).start()
@@ -770,6 +831,7 @@ class CurSir(QObject):
         self.done_list = []
         self.target = None
         self.busy = False
+        self._updating = False
         self._geom = None
         self._last = False
         self._last_label = "that"
@@ -869,18 +931,33 @@ class CurSir(QObject):
             self.tray.showMessage("CurSir", f"Up to date (v{VERSION})")
 
     def offer_update(self, latest):
-        if getattr(sys, "frozen", False):
-            # exe self-replace isn't wired yet — send them to the download
-            self.tray.showMessage(
-                "CurSir", f"v{latest} available — opening download page")
-            webbrowser.open(REPO_URL + "/releases/latest")
+        if self._updating:
             return
-        self.tray.showMessage("CurSir", f"Updating to v{latest}…")
-        if apply_source_update():
-            restart_app()
+        self._updating = True
+        self.tray.showMessage("CurSir", f"Installing v{latest}, sir…")
+        import threading
+
+        def work():
+            if getattr(sys, "frozen", False):
+                ok = apply_exe_update()          # download new exe + swap helper
+            else:
+                ok = apply_source_update()       # replace cursir.py
+            QTimer.singleShot(0, lambda: self._after_update(ok, latest))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _after_update(self, ok, latest):
+        if ok:
+            self.tray.showMessage("CurSir", "Update ready — restarting…")
+            # give the tray message a beat, then exit so the swap can happen
+            QTimer.singleShot(900, lambda: (restart_app()
+                                            if not getattr(sys, "frozen", False)
+                                            else os._exit(0)))
         else:
-            self.tray.showMessage("CurSir", "Update failed — opening repo")
-            webbrowser.open(REPO_URL)
+            self._updating = False
+            self.tray.showMessage(
+                "CurSir", "Update failed, sir — opening the download page")
+            webbrowser.open(REPO_URL + "/releases/latest")
 
     # -- flow ---------------------------------------------------------------
     def _trigger(self):
@@ -950,7 +1027,7 @@ class CurSir(QObject):
         cy = g.y() + (ny / 1000.0) * g.height()
         self.target = (int(cx), int(cy))
         if DEBUG:
-            print(f"[CurSir] map: nx={nx:.1f} ny={ny:.1f} | "
+            log(f"map: nx={nx:.1f} ny={ny:.1f} | "
                   f"geom=({g.x()},{g.y()},{g.width()}x{g.height()}) | "
                   f"screen=({int(cx)},{int(cy)})")
         self._last_label = str(res.get("label", "that")).strip() or "that"
@@ -1010,7 +1087,7 @@ class CurSir(QObject):
             img = pm.toImage()
             img.setDevicePixelRatio(1.0)
             if DEBUG:
-                print(f"[CurSir] screen: geom=({geom.x()},{geom.y()},"
+                log(f"screen: geom=({geom.x()},{geom.y()},"
                       f"{geom.width()}x{geom.height()} logical) "
                       f"dpr={dpr} capture={phys_w}x{phys_h} phys "
                       f"sent={img.width()}x{img.height()}")
