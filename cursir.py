@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -617,7 +617,13 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground, apps=None):
         "launch_app to its launch name or executable (e.g. 'chrome', "
         "'msedge', 'firefox', 'notepad', 'calc', 'explorer', 'spotify', "
         "'code', 'winword'); use Google Search to get the correct name if "
-        "unsure, and set last=true if opening it completes the task. When the "
+        "unsure. Set last=true on a launch ONLY if opening the app is the "
+        "ENTIRE task (e.g. the user only said 'open Chrome'). If the task "
+        "needs anything AFTER the app opens — searching, watching a video, "
+        "navigating to a site, playing something — set last=FALSE and keep "
+        "going once it has opened: next go to the address bar, type the site, "
+        "then search and click the result. Opening a browser is almost never "
+        "the final step. When the "
         "task implies an app by PURPOSE (e.g. 'make a video' -> a video "
         "editor, 'edit a photo' -> an image editor, 'take notes' -> a notes "
         "app), pick the BEST-MATCHING app from the user's installed-apps "
@@ -1800,8 +1806,8 @@ class CurSir(QObject):
             self.box.message("Very good, sir.")
             QTimer.singleShot(1600, self._cancel)
             return
-        # give the app a moment to open before the next screenshot
-        QTimer.singleShot(2000, lambda: self._run_step(first=False))
+        # give the app (esp. a browser) time to open before the next shot
+        QTimer.singleShot(2800, lambda: self._run_step(first=False))
 
     def _do_click(self):
         if not self.target:
