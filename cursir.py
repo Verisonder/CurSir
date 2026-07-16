@@ -371,12 +371,21 @@ class Glow(QWidget):
             p.setPen(QPen(col, max(1.0, 3 - i * 0.7)))
             rr = r + (2 - i) * 7
             p.drawEllipse(self._pt, int(rr), int(rr))
-        # blue cursor arrow — its TIP marks the exact click point
+        # blue cursor arrow — centred in the ring, no border, glowing
         arrow = [(0, 0), (0, 24), (6, 18), (10, 28), (14, 26),
                  (10, 17), (17, 17)]
-        poly = QPolygon([QPoint(self._pt.x() + ax, self._pt.y() + ay)
-                         for ax, ay in arrow])
-        p.setPen(QPen(QColor("#ffffff"), 1.6))
+        ox, oy = self._pt.x() - 8, self._pt.y() - 14   # centre bbox on point
+        poly = QPolygon([QPoint(ox + ax, oy + ay) for ax, ay in arrow])
+        halo = int(90 + 70 * (1 + math.sin(self._phase)) / 2)  # breathe
+        for w, a in ((13, halo // 3), (7, halo // 2)):
+            gc = QColor(ACCENT)
+            gc.setAlpha(a)
+            pen = QPen(gc, w)
+            pen.setJoinStyle(Qt.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawPolygon(poly)
+        p.setPen(Qt.NoPen)
         p.setBrush(QColor(ACCENT))
         p.drawPolygon(poly)
         p.end()
