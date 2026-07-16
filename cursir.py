@@ -3,24 +3,19 @@
 CurSir — a cursor that does things for you.
 
 Press the hotkey (Ctrl+Win by default). Your cursor gets a glowing ring and a
-little command box appears next to it. Tell it what you want in plain words:
+command box appears. Tell it what you want ("turn on dark mode in Photoshop",
+"where is export as PNG"). CurSir screenshots your active screen, asks Gemini
+(with live Google Search) where the next thing to click is, moves your cursor
+onto it and glows it. Press ENTER to click. Multi-step tasks advance one step
+at a time. ESC cancels.
 
-    "turn on dark mode in Photoshop"
-    "where is the export as PNG option"
-    "open the layer blending settings"
+Everything is controlled from the Settings window (system-tray icon → Settings):
+API key, hotkey, quality, auto-update, start-with-Windows.
 
-CurSir screenshots your active screen, asks Gemini (with live Google Search)
-where the next thing to click is, moves your cursor onto it and glows it, and
-shows a one-line instruction. Press ENTER to click it. If the task needs more
-steps, CurSir points at the next one, and so on. ESC cancels at any time.
-
-RUN:    python cursir.py
-NEEDS:  pip install PySide6 pynput
-KEY:    set the GEMINI_API_KEY environment variable, OR create the file
-        ~/.cursir.json  with:   {"gemini_key": "YOUR_KEY_HERE"}
-
-v0.1 — first cut. See the notes Claude sent alongside this for the parts that
-still need real-machine testing (hotkey behaviour, DPI scaling, click timing).
+RUN (from source):  python cursir.py
+BUILD AN EXE:       see build_windows.bat  ->  dist\\CurSir.exe
+KEY:                enter it in Settings, or set GEMINI_API_KEY, or edit
+                    ~/.cursir.json  {"gemini_key": "..."}
 """
 
 import os
@@ -29,16 +24,26 @@ import json
 import base64
 import math
 import platform
+import subprocess
+import webbrowser
 
 from PySide6.QtCore import (Qt, QObject, Signal, QTimer, QPoint,
                             QBuffer, QByteArray, QIODevice)
 from PySide6.QtGui import (QGuiApplication, QCursor, QColor, QPainter, QPen,
-                           QFont)
+                           QFont, QIcon, QPixmap, QAction)
 from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
-                               QVBoxLayout)
+                               QVBoxLayout, QHBoxLayout, QFormLayout,
+                               QComboBox, QCheckBox, QPushButton,
+                               QSystemTrayIcon, QMenu)
 
+VERSION = "0.1.0"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.json")
-ACCENT = "#379ED6"          # CurSir blue
+ACCENT = "#379ED6"
+REPO_URL = "https://github.com/Verisonder/CurSir"
+RAW_VERSION_URL = \
+    "https://raw.githubusercontent.com/Verisonder/CurSir/main/VERSION"
+RAW_SOURCE_URL = \
+    "https://raw.githubusercontent.com/Verisonder/CurSir/main/cursir.py"
 
 # (thinking budget, google-search grounding, screenshot width)
 QUALITY = {
@@ -47,20 +52,120 @@ QUALITY = {
     "accurate": (512, True,  1600),
 }
 
+HOTKEY_PRESETS = ["ctrl+win", "ctrl+alt+space", "ctrl+shift+space",
+                  "ctrl+alt+c", "ctrl+shift+c"]
+
+DEFAULTS = {"gemini_key": "", "quality": "balanced",
+            "hotkey": "ctrl+win", "auto_update": True,
+            "start_with_windows": False}
+
 
 def load_cfg():
-    cfg = {"gemini_key": os.environ.get("GEMINI_API_KEY", "").strip(),
-           "quality": "balanced"}
+    cfg = dict(DEFAULTS)
+    cfg["gemini_key"] = os.environ.get("GEMINI_API_KEY", "").strip()
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            for k, v in data.items():
-                if v:
-                    cfg[k] = v
+            for k in DEFAULTS:
+                if k in data and data[k] != "":
+                    cfg[k] = data[k]
     except Exception:
         pass
     return cfg
+
+
+def save_cfg(cfg):
+    try:
+        keep = {k: cfg.get(k, DEFAULTS[k]) for k in DEFAULTS}
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(keep, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def vtuple(s):
+    try:
+        return tuple(int(x) for x in str(s).strip().split("."))
+    except Exception:
+        return (0,)
+
+
+# --------------------------------------------------------------- updates ----
+def fetch_latest_version():
+    import urllib.request
+    try:
+        with urllib.request.urlopen(RAW_VERSION_URL, timeout=10) as r:
+            return r.read().decode().strip()
+    except Exception:
+        return None
+
+
+def update_available():
+    latest = fetch_latest_version()
+    if latest and vtuple(latest) > vtuple(VERSION):
+        return latest
+    return None
+
+
+def apply_source_update():
+    """Only when running from source (a .py). Downloads the latest cursir.py,
+    verifies it compiles, replaces this file, and returns True so the caller
+    can restart. Frozen .exe builds return False (handled by opening the
+    repo instead — exe self-replace is wired when we package)."""
+    if getattr(sys, "frozen", False):
+        return False
+    import urllib.request
+    try:
+        with urllib.request.urlopen(RAW_SOURCE_URL, timeout=20) as r:
+            data = r.read()
+        compile(data, "cursir_new.py", "exec")     # trust nothing that won't run
+        here = os.path.abspath(__file__)
+        tmp = here + ".new"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, here)
+        return True
+    except Exception:
+        return False
+
+
+def restart_app():
+    py = sys.executable
+    try:
+        if getattr(sys, "frozen", False):
+            subprocess.Popen([py])
+        else:
+            subprocess.Popen([py, os.path.abspath(__file__)])
+    except Exception:
+        pass
+    os._exit(0)
+
+
+def set_autostart(enable):
+    if platform.system() != "Windows":
+        return False
+    try:
+        import winreg
+        run = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, run, 0,
+                           winreg.KEY_SET_VALUE)
+        if enable:
+            if getattr(sys, "frozen", False):
+                cmd = f'"{sys.executable}"'
+            else:
+                cmd = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+            winreg.SetValueEx(k, "CurSir", 0, winreg.REG_SZ, cmd)
+        else:
+            try:
+                winreg.DeleteValue(k, "CurSir")
+            except FileNotFoundError:
+                pass
+        winreg.CloseKey(k)
+        return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------- Gemini ----
@@ -89,15 +194,14 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
         "whole row, toolbar or panel), in the order top, left, bottom, "
         "right, each normalized 0-1000 of the image height (y) and width "
         "(x). box MUST contain four plain INTEGERS like [112,204,146,318] - "
-        "NEVER letters or placeholder words. Hug the element's real edges - "
-        "a small button gives a small box. Keep 'say' under 22 words and "
-        "make it match how the app actually works. Set \"last\":true when "
-        "THIS element is the FINAL step that completes the whole task (a "
-        "simple one-click task is last:true on the very first step) - do NOT "
-        "set last:true if the user will still need another step after this "
-        "one. Set done=true (and make 'say' a short wrap-up) only when the "
-        "task is ALREADY fully complete in the screenshot with nothing left "
-        "to point at. Set found=false if the needed element isn't on screen "
+        "NEVER letters or placeholder words. Hug the element's real edges. "
+        "Keep 'say' under 22 words and make it match how the app actually "
+        "works. Set \"last\":true when THIS element is the FINAL step that "
+        "completes the whole task (a simple one-click task is last:true on "
+        "the very first step) - do NOT set last:true if the user will still "
+        "need another step after this one. Set done=true (and make 'say' a "
+        "short wrap-up) only when the task is ALREADY fully complete in the "
+        "screenshot. Set found=false if the needed element isn't on screen "
         "yet (then 'say' explains what to open or click first).")
 
     contents = [{"role": "user", "parts": [
@@ -160,8 +264,6 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
 
 # ------------------------------------------------------------- overlays ----
 class Glow(QWidget):
-    """Full-desktop, click-through overlay that pulses a ring at a point."""
-
     def __init__(self):
         super().__init__(None)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -214,11 +316,8 @@ class Glow(QWidget):
 
 
 class Box(QWidget):
-    """Small command / instruction window. Two modes: 'ask' takes a typed
-    request; 'step' shows an instruction and waits for Enter to click."""
-
     submitted = Signal(str)
-    confirmed = Signal()          # Enter in step mode = click
+    confirmed = Signal()
     canceled = Signal()
 
     def __init__(self):
@@ -273,7 +372,6 @@ class Box(QWidget):
         self.edit.setFocus()
 
     def step_at(self, gx, gy, text):
-        """Show an instruction pinned near a screen point, waiting for Enter."""
         self._mode = "step"
         self.edit.hide()
         self.status.setText(f"{text}\n\n⏎ Enter = click     Esc = stop")
@@ -319,16 +417,40 @@ class Box(QWidget):
 
 
 # --------------------------------------------------------------- hotkey ----
-class Hotkey(QObject):
-    """Global Ctrl+Win listener via pynput. Fires once per press-combo."""
+def _canon(key, K):
+    if key in (K.ctrl, K.ctrl_l, K.ctrl_r):
+        return "ctrl"
+    if key in (K.alt, K.alt_l, K.alt_r, getattr(K, "alt_gr", None)):
+        return "alt"
+    if key in (K.shift, K.shift_l, K.shift_r):
+        return "shift"
+    if key in (K.cmd, K.cmd_l, K.cmd_r):
+        return "win"
+    if key == K.space:
+        return "space"
+    ch = getattr(key, "char", None)
+    if ch:
+        return ch.lower()
+    return None
 
+
+class Hotkey(QObject):
     fired = Signal()
 
-    def __init__(self):
+    def __init__(self, combo="ctrl+win"):
         super().__init__()
-        self._ctrl = False
-        self._win = False
+        self._pressed = set()
         self._armed = True
+        self._listener = None
+        self._K = None
+        self.set_combo(combo)
+
+    def set_combo(self, combo):
+        parts = [p.strip().lower() for p in str(combo).split("+") if p.strip()]
+        mods = ("ctrl", "alt", "shift", "win")
+        self._mods = {p for p in parts if p in mods}
+        mains = [p for p in parts if p not in mods]
+        self._main = mains[0] if mains else None
 
     def start(self):
         try:
@@ -336,36 +458,50 @@ class Hotkey(QObject):
         except Exception:
             print("CurSir: pynput not installed — run: pip install pynput")
             return
-        self._K = keyboard
+        self._K = keyboard.Key
         self._listener = keyboard.Listener(on_press=self._press,
                                            on_release=self._release)
         self._listener.daemon = True
         self._listener.start()
 
-    def _press(self, k):
-        K = self._K.Key
-        if k in (K.ctrl, K.ctrl_l, K.ctrl_r):
-            self._ctrl = True
-        elif k in (K.cmd, K.cmd_l, K.cmd_r):
-            self._win = True
-        if self._ctrl and self._win and self._armed:
+    def restart(self, combo):
+        try:
+            if self._listener is not None:
+                self._listener.stop()
+        except Exception:
+            pass
+        self._pressed = set()
+        self._armed = True
+        self.set_combo(combo)
+        self.start()
+
+    def _match(self):
+        if not self._mods.issubset(self._pressed):
+            return False
+        if self._main is None:
+            return True
+        return self._main in self._pressed
+
+    def _press(self, key):
+        tok = _canon(key, self._K)
+        if tok is None:
+            return
+        self._pressed.add(tok)
+        if self._match() and self._armed:
             self._armed = False
             self.fired.emit()
 
-    def _release(self, k):
-        K = self._K.Key
-        if k in (K.ctrl, K.ctrl_l, K.ctrl_r):
-            self._ctrl = False
-        elif k in (K.cmd, K.cmd_l, K.cmd_r):
-            self._win = False
-        if not (self._ctrl and self._win):
+    def _release(self, key):
+        tok = _canon(key, self._K)
+        if tok is None:
+            return
+        self._pressed.discard(tok)
+        if not self._match():
             self._armed = True
 
 
 # --------------------------------------------------------------- worker ----
 class Vision(QObject):
-    """Runs the Gemini call off the UI thread; returns the dict via signal."""
-
     done = Signal(dict)
 
     def run(self, key, task, done_list, shot, think, ground):
@@ -375,8 +511,83 @@ class Vision(QObject):
             res = gemini_locate(key, task, done_list, shot, think, ground)
             self.done.emit(res or {})
 
-        t = threading.Thread(target=work, daemon=True)
-        t.start()
+        threading.Thread(target=work, daemon=True).start()
+
+
+# ------------------------------------------------------------- settings ----
+class Settings(QWidget):
+    def __init__(self, ctrl):
+        super().__init__(None)
+        self.ctrl = ctrl
+        self.setWindowTitle("CurSir — Settings")
+        self.setMinimumWidth(420)
+
+        form = QFormLayout()
+        self.key_edit = QLineEdit()
+        self.key_edit.setEchoMode(QLineEdit.Password)
+        self.key_edit.setPlaceholderText("paste your Gemini API key")
+
+        self.hotkey_edit = QComboBox()
+        self.hotkey_edit.setEditable(True)
+        self.hotkey_edit.addItems(HOTKEY_PRESETS)
+
+        self.quality_edit = QComboBox()
+        self.quality_edit.addItems(["fast", "balanced", "accurate"])
+
+        self.autoupd = QCheckBox("Check for updates automatically")
+        self.autostart = QCheckBox("Start CurSir when Windows starts")
+
+        form.addRow("Gemini API key", self.key_edit)
+        form.addRow("Hotkey", self.hotkey_edit)
+        form.addRow("Quality", self.quality_edit)
+        form.addRow("", self.autoupd)
+        form.addRow("", self.autostart)
+
+        self.upd_status = QLabel(f"CurSir v{VERSION}")
+        check_btn = QPushButton("Check for updates")
+        check_btn.clicked.connect(self._check)
+
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self._save)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.hide)
+
+        row = QHBoxLayout()
+        row.addWidget(check_btn)
+        row.addStretch(1)
+        row.addWidget(save_btn)
+        row.addWidget(close_btn)
+
+        lay = QVBoxLayout(self)
+        lay.addLayout(form)
+        lay.addWidget(self.upd_status)
+        lay.addLayout(row)
+
+    def load_from(self, cfg):
+        self.key_edit.setText(cfg.get("gemini_key", ""))
+        self.hotkey_edit.setCurrentText(cfg.get("hotkey", "ctrl+win"))
+        self.quality_edit.setCurrentText(cfg.get("quality", "balanced"))
+        self.autoupd.setChecked(bool(cfg.get("auto_update", True)))
+        self.autostart.setChecked(bool(cfg.get("start_with_windows", False)))
+
+    def _save(self):
+        self.ctrl.apply_settings(
+            key=self.key_edit.text().strip(),
+            hotkey=self.hotkey_edit.currentText().strip() or "ctrl+win",
+            quality=self.quality_edit.currentText(),
+            auto_update=self.autoupd.isChecked(),
+            start_with_windows=self.autostart.isChecked())
+        self.upd_status.setText("Saved ✓")
+
+    def _check(self):
+        self.upd_status.setText("checking…")
+        QApplication.processEvents()
+        latest = update_available()
+        if latest:
+            self.upd_status.setText(f"Update available: v{latest}")
+            self.ctrl.offer_update(latest)
+        else:
+            self.upd_status.setText(f"Up to date (v{VERSION})")
 
 
 # ----------------------------------------------------------- controller ----
@@ -386,13 +597,17 @@ class CurSir(QObject):
         self.cfg = cfg
         self.glow = Glow()
         self.box = Box()
-        self.hotkey = Hotkey()
+        self.hotkey = Hotkey(cfg.get("hotkey", "ctrl+win"))
         self.vision = Vision()
+        self.settings = Settings(self)
 
         self.task = ""
         self.done_list = []
-        self.target = None          # (x, y) screen coords of current element
+        self.target = None
         self.busy = False
+        self._geom = None
+        self._last = False
+        self._last_label = "that"
 
         self.box.submitted.connect(self._start_task)
         self.box.confirmed.connect(self._click_and_next)
@@ -400,16 +615,111 @@ class CurSir(QObject):
         self.vision.done.connect(self._on_vision)
         self.hotkey.fired.connect(self._trigger)
 
+        self._build_tray()
+
+    # -- lifecycle ----------------------------------------------------------
     def start(self):
         self.hotkey.start()
-        print("CurSir is running. Press Ctrl+Win anywhere. (Esc cancels.)")
+        print(f"CurSir v{VERSION} running. Hotkey: "
+              f"{self.cfg.get('hotkey')}. (tray icon → Settings)")
+        if self.cfg.get("start_with_windows"):
+            set_autostart(True)
         if not self.cfg.get("gemini_key"):
-            print("WARNING: no Gemini key. Set GEMINI_API_KEY or edit "
-                  f"{CONFIG_PATH}")
+            self.open_settings()             # first run: help them set a key
+        elif self.cfg.get("auto_update"):
+            QTimer.singleShot(3000, self._bg_update_check)
+
+    def _build_tray(self):
+        self.tray = QSystemTrayIcon(self._make_icon(), self)
+        self.tray.setToolTip("CurSir")
+        menu = QMenu()
+        a_set = QAction("Settings", self)
+        a_set.triggered.connect(self.open_settings)
+        a_go = QAction("Trigger now", self)
+        a_go.triggered.connect(self._trigger)
+        a_upd = QAction("Check for updates", self)
+        a_upd.triggered.connect(self._manual_update_check)
+        a_quit = QAction("Quit", self)
+        a_quit.triggered.connect(QApplication.instance().quit)
+        for a in (a_set, a_go, a_upd):
+            menu.addAction(a)
+        menu.addSeparator()
+        menu.addAction(a_quit)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._tray_click)
+        self.tray.show()
+
+    def _tray_click(self, reason):
+        if reason == QSystemTrayIcon.Trigger:
+            self.open_settings()
+
+    def _make_icon(self):
+        pm = QPixmap(64, 64)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(QPen(QColor(ACCENT), 5))
+        p.drawEllipse(12, 12, 40, 40)
+        p.setBrush(QColor("#e6edf3"))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(27, 27, 10, 10)
+        p.end()
+        return QIcon(pm)
+
+    def open_settings(self):
+        self.settings.load_from(self.cfg)
+        self.settings.show()
+        self.settings.raise_()
+        self.settings.activateWindow()
+
+    def apply_settings(self, key, hotkey, quality, auto_update,
+                       start_with_windows):
+        old_hotkey = self.cfg.get("hotkey")
+        self.cfg.update({"gemini_key": key, "hotkey": hotkey,
+                         "quality": quality, "auto_update": auto_update,
+                         "start_with_windows": start_with_windows})
+        save_cfg(self.cfg)
+        if hotkey != old_hotkey:
+            self.hotkey.restart(hotkey)
+        set_autostart(start_with_windows)
+
+    # -- updates ------------------------------------------------------------
+    def _bg_update_check(self):
+        import threading
+
+        def work():
+            latest = update_available()
+            if latest:
+                QTimer.singleShot(0, lambda: self.offer_update(latest))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _manual_update_check(self):
+        latest = update_available()
+        if latest:
+            self.offer_update(latest)
+        else:
+            self.tray.showMessage("CurSir", f"Up to date (v{VERSION})")
+
+    def offer_update(self, latest):
+        if getattr(sys, "frozen", False):
+            # exe self-replace isn't wired yet — send them to the download
+            self.tray.showMessage(
+                "CurSir", f"v{latest} available — opening download page")
+            webbrowser.open(REPO_URL + "/releases/latest")
+            return
+        self.tray.showMessage("CurSir", f"Updating to v{latest}…")
+        if apply_source_update():
+            restart_app()
+        else:
+            self.tray.showMessage("CurSir", "Update failed — opening repo")
+            webbrowser.open(REPO_URL)
 
     # -- flow ---------------------------------------------------------------
     def _trigger(self):
         if self.busy:
+            return
+        if not self.cfg.get("gemini_key"):
+            self.open_settings()
             return
         pos = QCursor.pos()
         self.glow.point_at(pos.x(), pos.y())
@@ -422,13 +732,12 @@ class CurSir(QObject):
 
     def _run_step(self, first):
         if not self.cfg.get("gemini_key"):
-            self.box.thinking("no Gemini key set — see the console 😿")
+            self.box.thinking("no Gemini key set — open Settings 😿")
             return
         self.busy = True
         think, ground, shot_w = QUALITY.get(self.cfg.get("quality"),
                                             QUALITY["balanced"])
         self.box.thinking("looking… 👀" if first else "checking next… 👀")
-        # hide our own overlays so they don't photobomb the screenshot
         self.glow.stop()
         QApplication.processEvents()
         shot, geom = self._grab(shot_w)
@@ -475,14 +784,13 @@ class CurSir(QObject):
             return
         x, y = self.target
         QCursor.setPos(x, y)
-        self._os_click(x, y)
+        self._os_click()
         self.done_list.append(self._last_label)
         if self._last:
             self.glow.stop()
             self.box.thinking("✅ done")
             QTimer.singleShot(1600, self._cancel)
             return
-        # give the app a moment to react, then look for the next step
         QTimer.singleShot(700, lambda: self._run_step(first=False))
 
     def _cancel(self):
@@ -524,8 +832,7 @@ class CurSir(QObject):
         except Exception:
             return None, None
 
-    def _os_click(self, x, y):
-        # bring our command box out of the way of the click target
+    def _os_click(self):
         try:
             from pynput.mouse import Button, Controller
             Controller().click(Button.left, 1)
@@ -535,8 +842,8 @@ class CurSir(QObject):
         if platform.system() == "Windows":
             try:
                 import ctypes
-                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # down
-                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # up
+                ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
+                ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
             except Exception:
                 pass
 
