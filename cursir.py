@@ -210,18 +210,20 @@ def gemini_call_json(key, contents, persona, think, ground, max_tokens=400):
               "gemini-3.1-flash-lite", "gemini-flash-lite-latest",
               "gemini-2.5-flash", "gemini-2.5-flash-lite")
 
-    def make_body(model, grounded):
+    def make_body(model, grounded, use_think=True):
         b = {"contents": contents,
              "systemInstruction": {"parts": [{"text": persona}]},
              "generationConfig": {"maxOutputTokens": max_tokens,
                                   "temperature": 0.6}}
-        if model.startswith("gemini-2.5"):
-            b["generationConfig"]["thinkingConfig"] = {"thinkingBudget": think}
-        else:
-            tc = {"thinkingBudget": think}
-            tc["thinkingLevel"] = ("none" if think == 0
-                                   else "low" if think <= 256 else "medium")
-            b["generationConfig"]["thinkingConfig"] = tc
+        if use_think:
+            if model.startswith("gemini-2.5"):
+                b["generationConfig"]["thinkingConfig"] = {
+                    "thinkingBudget": think}
+            else:
+                tc = {"thinkingBudget": think}
+                tc["thinkingLevel"] = ("none" if think == 0
+                                       else "low" if think <= 256 else "medium")
+                b["generationConfig"]["thinkingConfig"] = tc
         if grounded:
             b["tools"] = [{"google_search": {}}]
         return json.dumps(b).encode()
@@ -244,20 +246,36 @@ def gemini_call_json(key, contents, persona, think, ground, max_tokens=400):
         return json.loads(raw)
 
     gseq = (True, False) if ground else (False,)
+    last_err = "no reply"
     for m in models:
         url = ("https://generativelanguage.googleapis.com/v1beta/"
                f"models/{m}:generateContent?key={key}")
         for grounded in gseq:
-            try:
-                req = urllib.request.Request(
-                    url, data=make_body(m, grounded),
-                    headers={"Content-Type": "application/json"})
-                with urllib.request.urlopen(req, timeout=35) as r:
-                    return parse(json.loads(r.read().decode()))
-            except urllib.error.HTTPError:
-                continue
-            except Exception:
-                continue
+            for use_think in (True, False):
+                # only fall back to the no-thinking body if the thinking one
+                # was rejected with a 400 (mirrors SondeR Cat's fallback)
+                try:
+                    body = make_body(m, grounded, use_think)
+                    req = urllib.request.Request(
+                        url, data=body,
+                        headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=35) as r:
+                        return parse(json.loads(r.read().decode()))
+                except urllib.error.HTTPError as e:
+                    detail = ""
+                    try:
+                        detail = e.read().decode()[:200]
+                    except Exception:
+                        pass
+                    last_err = f"{m} (grounded={grounded}): HTTP {e.code} {detail}"
+                    if e.code == 400 and use_think:
+                        continue          # retry this model without thinking
+                    break                 # other errors → next grounded/model
+                except Exception as e:
+                    last_err = f"{m}: {type(e).__name__}: {e}"
+                    break
+    if DEBUG:
+        print(f"[CurSir] gemini call FAILED — last error: {last_err}")
     return {}
 
 
@@ -269,22 +287,24 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
                 if done_list else "This is the FIRST step.")
 
     persona = (
-        "You are CurSir, an on-screen assistant that controls the user's "
-        "mouse. The user asked you to do or find something in the app shown "
-        "in the screenshot. Work out the ACTUAL correct way to do it using "
-        "what you know and Google Search when useful - do NOT guess from the "
-        "screenshot alone. Then find the SINGLE next UI element the user must "
-        "click, and locate it PRECISELY in the screenshot. Respond with ONLY "
-        "minified JSON, no markdown, no code fences, exactly this shape: "
-        '{"found":true,"box":[100,200,140,320],"label":"element name",'
-        '"say":"short friendly instruction","last":false,"done":false} . '
+        "You are CurSir, a courteous on-screen BUTLER who controls the "
+        "user's mouse. The user asked you to do or find something in the app "
+        "shown in the screenshot. Work out the ACTUAL correct way to do it "
+        "using what you know and Google Search when useful - do NOT guess "
+        "from the screenshot alone. Then find the SINGLE next UI element the "
+        "user must click, and locate it PRECISELY in the screenshot. Respond "
+        "with ONLY minified JSON, no markdown, no code fences, exactly this "
+        'shape: {"found":true,"box":[100,200,140,320],"label":"element name",'
+        '"say":"instruction","last":false,"done":false} . '
         "box is the TIGHT bounding box of just that ONE element (not its "
         "whole row, toolbar or panel), in the order top, left, bottom, "
         "right, each normalized 0-1000 of the image height (y) and width "
         "(x). box MUST contain four plain INTEGERS like [112,204,146,318] - "
         "NEVER letters or placeholder words. Hug the element's real edges. "
-        "Keep 'say' under 22 words and make it match how the app actually "
-        "works. Set \"last\":true when THIS element is the FINAL step that "
+        "Write 'say' in the voice of a polite English butler addressing the "
+        "user as 'sir' (e.g. 'Kindly click the Settings icon, sir.'). Keep "
+        "it under 22 words, no emoji, and match how the app actually works. "
+        "Set \"last\":true when THIS element is the FINAL step that "
         "completes the whole task (a simple one-click task is last:true on "
         "the very first step) - do NOT set last:true if the user will still "
         "need another step after this one. Set done=true (and make 'say' a "
@@ -446,7 +466,7 @@ class Box(QWidget):
         lay.setSpacing(6)
 
         self.edit = QLineEdit(wrap)
-        self.edit.setPlaceholderText("tell CurSir what to do…")
+        self.edit.setPlaceholderText("How may I assist you, sir?")
         self.edit.setMinimumWidth(340)
         self.edit.returnPressed.connect(self._on_return)
         self.status = QLabel("", wrap)
@@ -486,7 +506,7 @@ class Box(QWidget):
     def step_at(self, gx, gy, text):
         self._mode = "step"
         self.edit.hide()
-        self.status.setText(f"{text}\n\n⏎ Enter = click     Esc = stop")
+        self.status.setText(f"{text}\n\n⏎ Enter to click     Esc to cancel")
         self.status.show()
         self.adjustSize()
         self._place(gx + 26, gy + 26)
@@ -495,7 +515,7 @@ class Box(QWidget):
         self.activateWindow()
         self.setFocus()
 
-    def thinking(self, text="looking… 👀"):
+    def thinking(self, text="One moment, sir…"):
         self._mode = "wait"
         self.edit.hide()
         self.status.setText(text)
@@ -880,7 +900,7 @@ class CurSir(QObject):
 
     def _run_step(self, first):
         if not self.cfg.get("gemini_key"):
-            self.box.thinking("no Gemini key set — open Settings 😿")
+            self.box.thinking("No API key set, sir — kindly add one in Settings.")
             return
         self.busy = True
         think, do_zoom, ground, shot_w = QUALITY.get(
@@ -891,32 +911,32 @@ class CurSir(QObject):
         shot, geom, img = self._grab(shot_w)
         self._geom = geom
         if not shot:
-            self.box.thinking("couldn't grab the screen 😿")
+            self.box.thinking("I'm unable to view the screen, sir.")
             self.busy = False
             return
-        self.box.thinking("looking… 👀" if first else "checking next… 👀")
+        self.box.thinking("One moment, sir…" if first else "Allow me a moment, sir…")
         self.vision.run(self.cfg["gemini_key"], self.task, self.done_list,
                         shot, think, ground, do_zoom, img)
 
     def _on_vision(self, res):
         self.busy = False
         if not res or not isinstance(res, dict):
-            self.box.thinking("Gemini didn't answer — try again 😿")
+            self.box.thinking("My apologies, sir — I received no reply. Shall we try again?")
             return
-        say = str(res.get("say", "")).strip() or "here you go"
+        say = str(res.get("say", "")).strip() or "As you wish, sir."
         if res.get("done"):
             self.glow.stop()
-            self.box.thinking("✅ " + say)
+            self.box.thinking(say)
             QTimer.singleShot(2200, self._cancel)
             return
         if not res.get("found") or not res.get("box"):
             self.glow.stop()
-            self.box.thinking("ℹ️ " + say)
+            self.box.thinking(say)
             return
         try:
             top, left, bottom, right = [float(v) for v in res["box"][:4]]
         except Exception:
-            self.box.thinking("got a bad location — try rephrasing 😿")
+            self.box.thinking("I couldn't place that precisely, sir. Might you rephrase?")
             return
         # prefer the zoom-refined centre when the second pass produced one
         if isinstance(res.get("_center"), (list, tuple)) \
@@ -948,7 +968,7 @@ class CurSir(QObject):
         self.done_list.append(self._last_label)
         if self._last:
             self.glow.stop()
-            self.box.thinking("✅ done")
+            self.box.thinking("Very good, sir.")
             QTimer.singleShot(1600, self._cancel)
             return
         QTimer.singleShot(700, lambda: self._run_step(first=False))
