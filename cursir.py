@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -134,23 +134,34 @@ def update_available():
 def apply_source_update():
     """Only when running from source (a .py). Downloads the latest cursir.py,
     verifies it compiles, replaces this file, and returns True so the caller
-    can restart. Frozen .exe builds return False (handled by opening the
-    repo instead — exe self-replace is wired when we package)."""
+    can restart. Returns 'ok' when applied, 'stale' when the new code hasn't
+    propagated yet (try again shortly), or 'fail' on error. Frozen builds
+    return 'fail' (they use the exe swapper instead)."""
     if getattr(sys, "frozen", False):
-        return False
+        return "fail"
     import urllib.request
+    import re
     try:
         log("update: downloading cursir.py")
         with urllib.request.urlopen(RAW_SOURCE_URL, timeout=20) as r:
             data = r.read()
         log(f"update: downloaded {len(data)} bytes; compiling")
         compile(data, "cursir_new.py", "exec")     # trust nothing that won't run
+        # GUARD: the VERSION marker and cursir.py are cached separately, so a
+        # freshly-bumped VERSION can arrive before the new code. Only apply if
+        # the downloaded code is genuinely newer than what we're running.
+        m = re.search(rb'VERSION = "([^"]+)"', data)
+        newv = m.group(1).decode() if m else None
+        if not newv or vtuple(newv) <= vtuple(VERSION):
+            log(f"update: downloaded v{newv} not newer than v{VERSION} "
+                "— not propagated yet, aborting cleanly")
+            return "stale"
         here = os.path.abspath(__file__)
         tmp = here + ".new"
         with open(tmp, "wb") as f:
             f.write(data)
         os.replace(tmp, here)
-        log(f"update: replaced {here}")
+        log(f"update: replaced {here} -> v{newv}")
         # also refresh the icon so the logo updates without a reinstall
         try:
             with urllib.request.urlopen(RAW_ICON_URL, timeout=15) as r:
@@ -163,10 +174,10 @@ def apply_source_update():
         except Exception as e:
             log(f"update: icon refresh skipped ({e})")
         log("update: SUCCESS")
-        return True
+        return "ok"
     except Exception as e:
         log(f"update FAILED: {type(e).__name__}: {e}")
-        return False
+        return "fail"
 
 
 def launch_app(name):
@@ -1228,10 +1239,10 @@ class CurSir(QObject):
             self.settings.set_progress(v)
             QApplication.processEvents()
             _t.sleep(0.05)
-        ok = apply_source_update()
-        self.settings.set_progress(90)
+        status = apply_source_update()
+        self.settings.set_progress(95)
         QApplication.processEvents()
-        self._after_update(ok, latest)
+        self._finish_update(status, latest)
 
     def _tick_progress(self):
         if self._prog < 90:
@@ -1239,18 +1250,28 @@ class CurSir(QObject):
             self.settings.set_progress(self._prog)
 
     def _after_update(self, ok, latest):
-        log(f"after_update: ok={ok}")
+        # frozen (exe) path arrives here via signal with a bool
         try:
             self._prog_timer.stop()
         except Exception:
             pass
-        if ok:
+        self._finish_update("ok" if ok else "fail", latest)
+
+    def _finish_update(self, status, latest):
+        log(f"finish_update: status={status}")
+        if status == "ok":
             self.settings.set_progress(100)
             self.tray.showMessage("CurSir", "Update installed — restarting…")
             self.settings.set_install_status("Installed — restarting CurSir…")
-            log("after_update: scheduling restart")
-            # let the full bar show for a beat, then exit so the swap completes
             QTimer.singleShot(1100, self._do_restart)
+        elif status == "stale":
+            # VERSION bumped but the new code hasn't propagated yet
+            self._updating = False
+            self.settings.end_install(False)
+            self.settings.set_install_status(
+                "Update is still uploading, sir — please try again in a "
+                "minute.")
+            self.settings.show_update(latest)      # keep Install for retry
         else:
             self._updating = False
             self.settings.end_install(False)
