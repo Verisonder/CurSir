@@ -35,8 +35,9 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QVBoxLayout, QHBoxLayout, QFormLayout,
                                QComboBox, QCheckBox, QPushButton,
                                QSystemTrayIcon, QMenu)
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -242,13 +243,13 @@ def create_desktop_shortcut():
         lnk = os.path.join(desktop, "CurSir.lnk")
         if getattr(sys, "frozen", False):
             target = sys.executable                 # the CurSir.exe
-            args = ""
+            args = "--settings"
             icon = sys.executable                   # icon is embedded in exe
         else:
             base = os.path.dirname(sys.executable)
             pyw = os.path.join(base, "pythonw.exe")
             target = pyw if os.path.exists(pyw) else sys.executable
-            args = f'"{os.path.abspath(__file__)}"'
+            args = f'"{os.path.abspath(__file__)}" --settings'
             ico = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "cursir.ico")
             icon = ico if os.path.exists(ico) else target
@@ -847,7 +848,7 @@ class CurSir(QObject):
         self._build_tray()
 
     # -- lifecycle ----------------------------------------------------------
-    def start(self):
+    def start(self, want_settings=False):
         self.hotkey.start()
         print(f"CurSir v{VERSION} running. Hotkey: "
               f"{self.cfg.get('hotkey')}. (tray icon → Settings)")
@@ -856,8 +857,8 @@ class CurSir(QObject):
             save_cfg(self.cfg)                  # so next launch isn't "first"
         if self.cfg.get("start_with_windows"):
             set_autostart(True)
-        if not self.cfg.get("gemini_key"):
-            self.open_settings()             # first run: help them set a key
+        if want_settings or not self.cfg.get("gemini_key"):
+            self.open_settings()   # shortcut launch, or first run without key
         elif self.cfg.get("auto_update"):
             QTimer.singleShot(3000, self._bg_update_check)
 
@@ -1118,6 +1119,48 @@ class CurSir(QObject):
                 pass
 
 
+SINGLETON_NAME = "CurSir-singleton-v1"
+
+
+class SingleInstance(QObject):
+    """Ensures one CurSir runs at a time and lets a second launch tell the
+    running one to open Settings, via a local socket."""
+
+    settings_requested = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self._server = None
+
+    def signal_existing(self):
+        """If an instance is already running, tell it to open Settings and
+        return True (this process should exit). Otherwise return False."""
+        sock = QLocalSocket()
+        sock.connectToServer(SINGLETON_NAME)
+        if sock.waitForConnected(300):
+            sock.write(b"settings")
+            sock.flush()
+            sock.waitForBytesWritten(300)
+            sock.disconnectFromServer()
+            return True
+        return False
+
+    def start_server(self):
+        QLocalServer.removeServer(SINGLETON_NAME)      # clear any stale socket
+        self._server = QLocalServer()
+        self._server.listen(SINGLETON_NAME)
+        self._server.newConnection.connect(self._on_conn)
+
+    def _on_conn(self):
+        c = self._server.nextPendingConnection()
+        if c is not None and c.waitForReadyRead(200):
+            msg = bytes(c.readAll()).decode(errors="ignore")
+            if "settings" in msg:
+                self.settings_requested.emit()
+        if c is not None:
+            c.disconnectFromServer()
+
+
 def main():
     if platform.system() == "Windows":
         os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
@@ -1128,8 +1171,15 @@ def main():
         pass
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+
+    si = SingleInstance()
+    if si.signal_existing():
+        return          # another CurSir is running — it will open Settings
+
+    si.start_server()
     cur = CurSir(load_cfg())
-    cur.start()
+    si.settings_requested.connect(cur.open_settings)
+    cur.start(want_settings=("--settings" in sys.argv))
     sys.exit(app.exec())
 
 
