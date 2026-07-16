@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.4.7"
+VERSION = "0.4.8"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -540,35 +540,48 @@ def gemini_call_json(key, contents, persona, think, ground, max_tokens=400):
                 raw = raw[i:j + 1]
         return json.loads(raw)
 
+    import time as _t
     gseq = (True, False) if ground else (False,)
     last_err = "no reply"
+    rate_limited = False
     for m in models:
         url = ("https://generativelanguage.googleapis.com/v1beta/"
                f"models/{m}:generateContent?key={key}")
         for grounded in gseq:
             for use_think in (True, False):
-                # only fall back to the no-thinking body if the thinking one
-                # was rejected with a 400 (mirrors SondeR Cat's fallback)
-                try:
-                    body = make_body(m, grounded, use_think)
-                    req = urllib.request.Request(
-                        url, data=body,
-                        headers={"Content-Type": "application/json"})
-                    with urllib.request.urlopen(req, timeout=35) as r:
-                        return parse(json.loads(r.read().decode()))
-                except urllib.error.HTTPError as e:
-                    detail = ""
+                # up to 2 tries on 429 (rate limit): wait, then retry
+                for attempt in range(3):
                     try:
-                        detail = e.read().decode()[:200]
-                    except Exception:
-                        pass
-                    last_err = f"{m} (grounded={grounded}): HTTP {e.code} {detail}"
-                    if e.code == 400 and use_think:
-                        continue          # retry this model without thinking
-                    break                 # other errors → next grounded/model
-                except Exception as e:
-                    last_err = f"{m}: {type(e).__name__}: {e}"
-                    break
+                        body = make_body(m, grounded, use_think)
+                        req = urllib.request.Request(
+                            url, data=body,
+                            headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(req, timeout=35) as r:
+                            return parse(json.loads(r.read().decode()))
+                    except urllib.error.HTTPError as e:
+                        detail = ""
+                        try:
+                            detail = e.read().decode()[:200]
+                        except Exception:
+                            pass
+                        last_err = (f"{m} (grounded={grounded}): "
+                                    f"HTTP {e.code} {detail}")
+                        if e.code == 429 and attempt < 2:
+                            rate_limited = True
+                            _t.sleep(5)        # let the per-minute limit cool
+                            continue           # retry same request
+                        break
+                    except Exception as e:
+                        last_err = f"{m}: {type(e).__name__}: {e}"
+                        break
+                else:
+                    continue
+                # reached on a non-retry break
+                if "HTTP 400" in last_err and use_think:
+                    continue          # retry this model without thinking
+                break                 # other errors → next grounded/model
+    if rate_limited and "429" in last_err:
+        last_err = "HTTP 429 rate limit / quota — " + last_err
     if DEBUG:
         log(f"gemini call FAILED — last error: {last_err}")
     return {"_error": last_err}
