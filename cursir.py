@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -187,6 +187,40 @@ BROWSER_MAP = {"chrome": "chrome", "edge": "msedge", "firefox": "firefox",
                "brave": "brave", "opera": "opera", "vivaldi": "vivaldi"}
 
 
+def installed_browsers():
+    """The browsers actually installed, from the Windows registry
+    (StartMenuInternet). Returns {display name: exe path}."""
+    out = {}
+    if platform.system() != "Windows":
+        return out
+    import winreg
+    import shlex
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            base = winreg.OpenKey(root, r"SOFTWARE\Clients\StartMenuInternet")
+        except Exception:
+            continue
+        i = 0
+        while True:
+            try:
+                sub = winreg.EnumKey(base, i)
+                i += 1
+            except OSError:
+                break
+            try:
+                with winreg.OpenKey(base, sub) as k:
+                    name = (winreg.QueryValueEx(k, "")[0] or sub).strip()
+                with winreg.OpenKey(base, sub + r"\shell\open\command") as k:
+                    cmd = winreg.QueryValueEx(k, "")[0]
+                exe = shlex.split(cmd)[0] if cmd else None
+                if exe and os.path.exists(exe) and name not in out:
+                    out[name] = exe
+            except Exception:
+                pass
+        winreg.CloseKey(base)
+    return out
+
+
 def default_browser_exe():
     """The user's actual default browser executable, via the Windows registry."""
     if platform.system() != "Windows":
@@ -210,11 +244,18 @@ def default_browser_exe():
 
 
 def resolve_browser(pref):
-    """Turn a preference ('system default' or a name) into a launch target."""
-    pref = (pref or "system default").lower()
-    if pref == "system default":
+    """Turn a preference ('system default' or a browser display name) into a
+    launch target (exe path when known)."""
+    pref = (pref or "system default").strip()
+    if pref.lower() == "system default":
         return default_browser_exe() or "msedge"
-    return BROWSER_MAP.get(pref, pref)
+    br = installed_browsers()
+    if pref in br:
+        return br[pref]
+    for name, exe in br.items():          # loose match (old saved names)
+        if pref.lower() in name.lower():
+            return exe
+    return BROWSER_MAP.get(pref.lower(), pref)
 
 
 def launch_app(name):
@@ -925,8 +966,7 @@ class Settings(QWidget):
         self.quality_edit.addItems(["fast", "balanced", "accurate"])
 
         self.browser_edit = QComboBox()
-        self.browser_edit.addItems(["system default", "chrome", "edge",
-                                    "firefox", "brave", "opera", "vivaldi"])
+        self.browser_edit.addItem("system default")   # filled in load_from
 
         self.autoupd = QCheckBox("Check for updates automatically")
         self.autostart = QCheckBox("Start CurSir when Windows starts")
@@ -1011,7 +1051,17 @@ class Settings(QWidget):
         self.key_edit.setText(cfg.get("gemini_key", ""))
         self.hotkey_edit.setCurrentText(cfg.get("hotkey", "ctrl+win"))
         self.quality_edit.setCurrentText(cfg.get("quality", "balanced"))
-        self.browser_edit.setCurrentText(cfg.get("browser", "system default"))
+        # populate the browser list from what's actually installed
+        cur = cfg.get("browser", "system default")
+        self.browser_edit.blockSignals(True)
+        self.browser_edit.clear()
+        self.browser_edit.addItem("system default")
+        for name in installed_browsers().keys():
+            self.browser_edit.addItem(name)
+        if self.browser_edit.findText(cur) < 0:
+            self.browser_edit.addItem(cur)
+        self.browser_edit.setCurrentText(cur)
+        self.browser_edit.blockSignals(False)
         self.autoupd.setChecked(bool(cfg.get("auto_update", True)))
         self.autostart.setChecked(bool(cfg.get("start_with_windows", False)))
         self.startlaunch.setChecked(bool(cfg.get("start_on_launch", False)))
