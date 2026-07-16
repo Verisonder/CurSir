@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -426,10 +426,17 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground):
         "false. Write 'say' in the voice of a polite English butler "
         "addressing the user as 'sir' (e.g. 'Kindly click the Settings icon, "
         "sir.'). Keep it under 22 words, no emoji, and match how the app "
-        "actually works. Set \"last\":true when THIS element is the FINAL "
-        "step that completes the whole task (a simple one-click task is "
-        "last:true on the very first step) - do NOT set last:true if the "
-        "user will still need another step after this one. Set done=true "
+        "actually works. Set \"last\":true ONLY when THIS action reaches the "
+        "user's real END GOAL (the requested video/page is open, the search "
+        "is submitted, the setting is changed). Navigating to a website or "
+        "opening an app is almost always an EARLY step, NOT the last one — "
+        "after the page loads, KEEP GOING (search, click the result, open "
+        "the channel/video) until the goal is truly done. For 'watch a video "
+        "about X on YouTube': go to youtube.com, then type X in YouTube's "
+        "search box and submit, then click the intended video or channel. "
+        "Never stop at the homepage. Do "
+        "NOT set last:true if the user will still need another step after "
+        "this one. Set done=true "
         "(and make 'say' a short wrap-up) only when the task is ALREADY "
         "fully complete in the screenshot. Only as a LAST RESORT, if the "
         "next element is genuinely not visible and you cannot act without "
@@ -1429,7 +1436,7 @@ class CurSir(QObject):
             QTimer.singleShot(1600, self._cancel)
             return
         # give the app a moment to open before the next screenshot
-        QTimer.singleShot(1500, lambda: self._run_step(first=False))
+        QTimer.singleShot(2000, lambda: self._run_step(first=False))
 
     def _do_click(self):
         if not self.target:
@@ -1469,13 +1476,17 @@ class CurSir(QObject):
         except Exception:
             pass
         self.done_list.append(f"typed «{text[:24]}»")
+        submitted = self._pending_submit
         self._pending_type = ""
         if self._last:
             self.glow.stop()
             self.box.thinking("Very good, sir.")
             QTimer.singleShot(1600, self._cancel)
             return
-        QTimer.singleShot(800, lambda: self._run_step(first=False))
+        # a submitted search/URL triggers a page load — give it time before
+        # the next screenshot, or CurSir photographs a half-loaded page
+        QTimer.singleShot(2600 if submitted else 800,
+                          lambda: self._run_step(first=False))
 
     def _cancel(self):
         self.busy = False
