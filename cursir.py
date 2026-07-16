@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QComboBox, QCheckBox, QPushButton,
                                QSystemTrayIcon, QMenu)
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -150,12 +150,14 @@ def apply_source_update():
 
 
 def restart_app():
-    py = sys.executable
     try:
         if getattr(sys, "frozen", False):
-            subprocess.Popen([py])
+            subprocess.Popen([sys.executable])
         else:
-            subprocess.Popen([py, os.path.abspath(__file__)])
+            exe = sys.executable
+            pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+            launcher = pyw if os.path.exists(pyw) else exe
+            subprocess.Popen([launcher, os.path.abspath(__file__)])
     except Exception:
         pass
     os._exit(0)
