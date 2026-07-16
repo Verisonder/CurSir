@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -63,6 +63,8 @@ RAW_VERSION_URL = \
     "https://raw.githubusercontent.com/Verisonder/CurSir/main/VERSION"
 RAW_SOURCE_URL = \
     "https://raw.githubusercontent.com/Verisonder/CurSir/main/cursir.py"
+RAW_ICON_URL = \
+    "https://raw.githubusercontent.com/Verisonder/CurSir/main/cursir.ico"
 
 # (thinking budget, zoom-refine pass, google-search grounding, screenshot width)
 QUALITY = {
@@ -145,6 +147,16 @@ def apply_source_update():
         with open(tmp, "wb") as f:
             f.write(data)
         os.replace(tmp, here)
+        # also refresh the icon so the logo updates without a reinstall
+        try:
+            with urllib.request.urlopen(RAW_ICON_URL, timeout=20) as r:
+                idata = r.read()
+            if idata:
+                icop = os.path.join(os.path.dirname(here), "cursir.ico")
+                with open(icop, "wb") as f:
+                    f.write(idata)
+        except Exception:
+            pass
         return True
     except Exception:
         return False
@@ -575,7 +587,28 @@ class Box(QWidget):
         self.show()
         self.raise_()
         self.activateWindow()
+        self._force_foreground()
         self.edit.setFocus()
+
+    def _force_foreground(self):
+        """Windows won't hand focus to a window that appears from a global
+        hotkey, so grab it explicitly (AttachThreadInput trick)."""
+        if platform.system() != "Windows":
+            return
+        try:
+            import ctypes
+            u = ctypes.windll.user32
+            k = ctypes.windll.kernel32
+            hwnd = int(self.winId())
+            fg = u.GetForegroundWindow()
+            fg_thread = u.GetWindowThreadProcessId(fg, None)
+            cur_thread = k.GetCurrentThreadId()
+            u.AttachThreadInput(fg_thread, cur_thread, True)
+            u.BringWindowToTop(hwnd)
+            u.SetForegroundWindow(hwnd)
+            u.AttachThreadInput(fg_thread, cur_thread, False)
+        except Exception:
+            pass
 
     def step_at(self, gx, gy, text):
         self._mode = "step"
@@ -1027,6 +1060,12 @@ class CurSir(QObject):
             self.open_settings()
 
     def _make_icon(self):
+        ico = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "cursir.ico")
+        if os.path.exists(ico):
+            icon = QIcon(ico)
+            if not icon.isNull():
+                return icon
         pm = QPixmap(64, 64)
         pm.fill(Qt.transparent)
         p = QPainter(pm)
@@ -1363,6 +1402,10 @@ def main():
         pass
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    _ico = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "cursir.ico")
+    if os.path.exists(_ico):
+        app.setWindowIcon(QIcon(_ico))
 
     si = SingleInstance()
     if si.signal_existing():
