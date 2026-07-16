@@ -923,11 +923,21 @@ class CurSir(QObject):
             if scr is None:
                 scr = QGuiApplication.screenAt(QCursor.pos()) \
                     or QGuiApplication.primaryScreen()
-            geom = scr.geometry()
+            geom = scr.geometry()          # LOGICAL screen rect (for mapping)
+            dpr = scr.devicePixelRatio()   # scale factor, e.g. 1.5 at 150%
             pm = scr.grabWindow(0)
+            # capture comes back at PHYSICAL resolution; pin dpr=1 so widths
+            # are raw pixels and the fraction math has no hidden scaling
+            phys_w, phys_h = pm.width(), pm.height()
             if pm.width() > maxw:
                 pm = pm.scaledToWidth(maxw, Qt.SmoothTransformation)
-            img = pm.toImage()          # kept for the zoom-refine crop
+            img = pm.toImage()
+            img.setDevicePixelRatio(1.0)
+            if DEBUG:
+                print(f"[CurSir] screen: geom=({geom.x()},{geom.y()},"
+                      f"{geom.width()}x{geom.height()} logical) "
+                      f"dpr={dpr} capture={phys_w}x{phys_h} phys "
+                      f"sent={img.width()}x{img.height()}")
             ba = QByteArray()
             buf = QBuffer(ba)
             buf.open(QIODevice.WriteOnly)
@@ -956,6 +966,11 @@ class CurSir(QObject):
 def main():
     if platform.system() == "Windows":
         os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    try:
+        QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     cur = CurSir(load_cfg())
