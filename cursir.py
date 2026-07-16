@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -1064,6 +1064,7 @@ def _canon(key, K):
 
 class Hotkey(QObject):
     fired = Signal()
+    esc = Signal()
 
     def __init__(self, combo="ctrl+win"):
         super().__init__()
@@ -1121,6 +1122,8 @@ class Hotkey(QObject):
         return self._main in self._pressed
 
     def _press(self, key):
+        if self._K is not None and key == self._K.esc:
+            self.esc.emit()            # global stop, even when box is hidden
         tok = _canon(key, self._K)
         if tok is None:
             return
@@ -1421,6 +1424,7 @@ class CurSir(QObject):
         self.done_list = []
         self.target = None
         self.busy = False
+        self._stopped = False
         self._updating = False
         self._install_active = False
         self._pending_update = None
@@ -1440,6 +1444,7 @@ class CurSir(QObject):
         self.box.canceled.connect(self._cancel)
         self.vision.done.connect(self._on_vision)
         self.hotkey.fired.connect(self._trigger)
+        self.hotkey.esc.connect(self._on_global_esc)
 
         self._build_tray()
 
@@ -1699,11 +1704,14 @@ class CurSir(QObject):
         self.box.ask_at(pos.x(), pos.y())
 
     def _start_task(self, task):
+        self._stopped = False
         self.task = task
         self.done_list = []
         self._run_step(first=True)
 
     def _run_step(self, first):
+        if getattr(self, '_stopped', False):
+            return
         self._acting = False
         if not self.cfg.get("gemini_key"):
             self.box.message("No API key set, sir — kindly add one in Settings.")
@@ -1731,6 +1739,8 @@ class CurSir(QObject):
 
     def _on_vision(self, res):
         self.busy = False
+        if getattr(self, "_stopped", False):
+            return
         if not res or not isinstance(res, dict) or res.get("_error"):
             self.box.message(self._friendly_error((res or {}).get("_error", "")))
             return
@@ -1861,6 +1871,8 @@ class CurSir(QObject):
                 int(g.y() + (ny / 1000.0) * g.height()))
 
     def _click_and_next(self):
+        if getattr(self, "_stopped", False):
+            return
         if getattr(self, "_acting", False):
             return
         # open-url step (fastest path to a website)
@@ -1931,6 +1943,8 @@ class CurSir(QObject):
             log(f"scroll failed: {e}")
 
     def _do_drag(self):
+        if getattr(self, '_stopped', False):
+            return
         if not self.target or not getattr(self, "_pending_drag", None):
             self._pending_drag = None
             return self._do_click()          # fall back to a plain click
@@ -1964,6 +1978,8 @@ class CurSir(QObject):
         QTimer.singleShot(800, lambda: self._run_step(first=False))
 
     def _do_open_url(self):
+        if getattr(self, '_stopped', False):
+            return
         url = getattr(self, "_pending_open_url", "")
         self._pending_open_url = ""
         open_url_in_browser(url, self.cfg.get("browser", "system default"))
@@ -1977,6 +1993,8 @@ class CurSir(QObject):
         QTimer.singleShot(3000, lambda: self._run_step(first=False))
 
     def _do_launch(self):
+        if getattr(self, '_stopped', False):
+            return
         name = getattr(self, "_pending_launch", "")
         self._pending_launch = ""
         if name.lower() in BROWSER_NAMES or "browser" in name.lower():
@@ -1996,6 +2014,8 @@ class CurSir(QObject):
         QTimer.singleShot(2800, lambda: self._run_step(first=False))
 
     def _do_click(self):
+        if getattr(self, '_stopped', False):
+            return
         if not self.target:
             return
         x, y = self.target
@@ -2010,6 +2030,8 @@ class CurSir(QObject):
         QTimer.singleShot(700, lambda: self._run_step(first=False))
 
     def _do_paste(self):
+        if getattr(self, "_stopped", False):
+            return
         if not self.target:
             return
         import time as _t
@@ -2045,10 +2067,20 @@ class CurSir(QObject):
         QTimer.singleShot(2600 if submitted else 800,
                           lambda: self._run_step(first=False))
 
+    def _on_global_esc(self):
+        # Esc works anywhere during a task, even when the box is hidden
+        if self.busy or self.box.isVisible() or self._acting:
+            self._cancel()
+
     def _cancel(self):
+        self._stopped = True          # kills any queued next-steps
         self.busy = False
         self._acting = False
         self.target = None
+        self._pending_launch = ""
+        self._pending_open_url = ""
+        self._pending_type = ""
+        self._pending_drag = None
         self.glow.stop()
         self.box.spinner.stop()
         self.box.hide()
