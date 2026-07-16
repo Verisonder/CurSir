@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -596,7 +596,8 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground, apps=None):
         "with ONLY minified JSON, no markdown, no code fences, exactly this "
         'shape: {"found":true,"box":[100,200,140,320],"label":"element name",'
         '"say":"instruction","last":false,"done":false,"double":false,'
-        '"type_text":"","submit":false,"launch_app":"","open_url":""} . '
+        '"type_text":"","submit":false,"launch_app":"","open_url":"",'
+        '"scroll":"","drag_to":[]} . '
         "box is the TIGHT bounding box of just that ONE element (not its "
         "whole row, toolbar or panel), in the order top, left, bottom, "
         "right, each normalized 0-1000 of the image height (y) and width "
@@ -657,7 +658,13 @@ def gemini_locate(key, task, done_list, shot_b64, think, ground, apps=None):
         "editor, 'edit a photo' -> an image editor, 'take notes' -> a notes "
         "app), pick the BEST-MATCHING app from the user's installed-apps "
         "list below and set launch_app to its EXACT name from that list. "
-        "Leave launch_app empty for on-screen click steps.")
+        "Leave launch_app empty for on-screen click steps. If the element "
+        "you need is NOT visible and the view can scroll, set scroll to "
+        "'down' (or 'up','left','right') to reveal more, and CurSir will "
+        "scroll and look again — use this instead of giving up. To DRAG AND "
+        "DROP, set box to the item to drag and drag_to to the destination's "
+        "bounding box [top,left,bottom,right] in the same 0-1000 scale; "
+        "CurSir presses on the item, moves to the destination and releases.")
 
     apps_txt = ""
     if apps:
@@ -963,12 +970,14 @@ class Box(QWidget):
             pass
 
     def step_at(self, gx, gy, text, typing=False, preview="", auto=False,
-                launch=False):
+                launch=False, drag=False):
         self._mode = "step"
         self.spinner.stop()
         self.edit.hide()
         if auto:
             tail = "Acting automatically…   Esc to cancel"
+        elif drag:
+            tail = "⏎ Enter to drag     Esc to cancel"
         elif launch:
             tail = "⏎ Enter to launch     Esc to cancel"
         elif typing:
@@ -1408,6 +1417,7 @@ class CurSir(QObject):
         self._pending_launch = ""
         self._pending_open_url = ""
         self._pending_type = ""
+        self._pending_drag = None
         self._apps = None
         self._geom = None
         self._last = False
@@ -1751,6 +1761,14 @@ class CurSir(QObject):
             if auto:
                 QTimer.singleShot(900, self._click_and_next)
             return
+        # scroll step — reveal off-screen content, then look again
+        scroll = str(res.get("scroll", "")).strip().lower()
+        if scroll in ("up", "down", "left", "right"):
+            self.glow.stop()
+            self.box.message(f"Scrolling {scroll}, sir…")
+            self._do_scroll(scroll)
+            QTimer.singleShot(900, lambda: self._run_step(first=False))
+            return
         if not res.get("found") or not res.get("box"):
             self.glow.stop()
             self.box.message(say)
@@ -1767,14 +1785,23 @@ class CurSir(QObject):
         else:
             nx = (left + right) / 2.0
             ny = (top + bottom) / 2.0
-        g = self._geom
-        cx = g.x() + (nx / 1000.0) * g.width()
-        cy = g.y() + (ny / 1000.0) * g.height()
-        self.target = (int(cx), int(cy))
+        self.target = self._map(nx, ny)
+        cx, cy = self.target
+        # drag-and-drop destination, if any
+        self._pending_drag = None
+        drag = res.get("drag_to")
+        if isinstance(drag, (list, tuple)) and len(drag) >= 4:
+            try:
+                dt, dl, db, dr = [float(v) for v in drag[:4]]
+                self._pending_drag = self._map((dl + dr) / 2.0,
+                                               (dt + db) / 2.0)
+            except Exception:
+                self._pending_drag = None
         if DEBUG:
+            g = self._geom
             log(f"map: nx={nx:.1f} ny={ny:.1f} | "
-                  f"geom=({g.x()},{g.y()},{g.width()}x{g.height()}) | "
-                  f"screen=({int(cx)},{int(cy)})")
+                f"geom=({g.x()},{g.y()},{g.width()}x{g.height()}) | "
+                f"screen=({cx},{cy})")
         self._last_label = str(res.get("label", "that")).strip() or "that"
         self._last = bool(res.get("last"))
         self._double = bool(res.get("double"))
@@ -1785,7 +1812,10 @@ class CurSir(QObject):
         QCursor.setPos(self.target[0], self.target[1])
         self.glow.point_at(*self.target)
         auto = bool(self.cfg.get("auto_mode"))
-        if self._pending_type:
+        if self._pending_drag:
+            self.box.step_at(self.target[0], self.target[1], say,
+                             drag=True, auto=auto)
+        elif self._pending_type:
             self.box.step_at(self.target[0], self.target[1], say,
                              typing=True, preview=self._pending_type, auto=auto)
         else:
@@ -1793,6 +1823,11 @@ class CurSir(QObject):
         if auto:
             # act on its own after a beat so the glow is visible (Esc cancels)
             QTimer.singleShot(1000, self._click_and_next)
+
+    def _map(self, nx, ny):
+        g = self._geom
+        return (int(g.x() + (nx / 1000.0) * g.width()),
+                int(g.y() + (ny / 1000.0) * g.height()))
 
     def _click_and_next(self):
         if getattr(self, "_acting", False):
@@ -1820,7 +1855,9 @@ class CurSir(QObject):
         # alive so the effect stays continuous across the whole task
         self.box.hide()
         QApplication.processEvents()
-        if getattr(self, "_pending_type", ""):
+        if getattr(self, "_pending_drag", None):
+            QTimer.singleShot(70, self._do_drag)
+        elif getattr(self, "_pending_type", ""):
             QTimer.singleShot(70, self._do_paste)
         else:
             QTimer.singleShot(70, self._do_click)
@@ -1845,6 +1882,55 @@ class CurSir(QObject):
             if low in n.lower() or n.lower() in low:
                 return t
         return name                          # let the OS resolver try
+
+    def _do_scroll(self, direction):
+        try:
+            from pynput.mouse import Controller
+            m = Controller()
+            amt = 5
+            if direction == "down":
+                m.scroll(0, -amt)
+            elif direction == "up":
+                m.scroll(0, amt)
+            elif direction == "left":
+                m.scroll(-amt, 0)
+            elif direction == "right":
+                m.scroll(amt, 0)
+        except Exception as e:
+            log(f"scroll failed: {e}")
+
+    def _do_drag(self):
+        if not self.target or not getattr(self, "_pending_drag", None):
+            self._pending_drag = None
+            return self._do_click()          # fall back to a plain click
+        import time as _t
+        sx, sy = self.target
+        dx, dy = self._pending_drag
+        self._pending_drag = None
+        try:
+            from pynput.mouse import Button, Controller
+            m = Controller()
+            QCursor.setPos(sx, sy)
+            _t.sleep(0.08)
+            m.press(Button.left)
+            _t.sleep(0.12)
+            steps = 18                        # move gradually so apps register
+            for i in range(1, steps + 1):
+                ix = sx + (dx - sx) * i / steps
+                iy = sy + (dy - sy) * i / steps
+                QCursor.setPos(int(ix), int(iy))
+                _t.sleep(0.012)
+            _t.sleep(0.10)
+            m.release(Button.left)
+        except Exception as e:
+            log(f"drag failed: {e}")
+        self.done_list.append(f"dragged {self._last_label}")
+        if self._last:
+            self.glow.stop()
+            self.box.message("Very good, sir.")
+            QTimer.singleShot(1600, self._cancel)
+            return
+        QTimer.singleShot(800, lambda: self._run_step(first=False))
 
     def _do_open_url(self):
         url = getattr(self, "_pending_open_url", "")
