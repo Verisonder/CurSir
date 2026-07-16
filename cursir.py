@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -1777,8 +1777,11 @@ class CurSir(QObject):
             self._last = bool(res.get("last"))
             auto = bool(self.cfg.get("auto_mode"))
             pos = QCursor.pos()
-            self.box.step_at(pos.x(), pos.y(),
-                             say or f"Launching {launch}, sir.",
+            if launch.lower() in BROWSER_NAMES or "browser" in launch.lower():
+                disp = f"Opening {self._browser_name()}, sir."
+            else:
+                disp = say or f"Launching {launch}, sir."
+            self.box.step_at(pos.x(), pos.y(), disp,
                              launch=True, auto=auto)
             if auto:
                 QTimer.singleShot(900, self._click_and_next)
@@ -1864,6 +1867,15 @@ class CurSir(QObject):
                     "internet connection.")
         return ("My apologies, sir — I received no reply. Shall we try "
                 "again?")
+
+    def _browser_name(self):
+        pref = self.cfg.get("browser", "system default")
+        if pref and pref.lower() != "system default":
+            return pref
+        exe = default_browser_exe()
+        if exe:
+            return os.path.splitext(os.path.basename(exe))[0].title()
+        return "your browser"
 
     def _map(self, nx, ny):
         g = self._geom
