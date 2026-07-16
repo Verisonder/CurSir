@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.4.9"
+VERSION = "0.5.0"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -571,7 +571,7 @@ def gemini_call_json(key, contents, persona, think, ground, max_tokens=400):
                     break
     if DEBUG:
         log(f"gemini call FAILED — last error: {last_err}")
-    return {"_error": last_err}
+    return {}
 
 
 def gemini_locate(key, task, done_list, shot_b64, think, ground, apps=None):
@@ -1731,8 +1731,8 @@ class CurSir(QObject):
 
     def _on_vision(self, res):
         self.busy = False
-        if not res or not isinstance(res, dict) or res.get("_error"):
-            self.box.message(self._friendly_error((res or {}).get("_error", "")))
+        if not res or not isinstance(res, dict):
+            self.box.message("My apologies, sir — I received no reply. Shall we try again?")
             return
         say = str(res.get("say", "")).strip() or "As you wish, sir."
         if res.get("done"):
@@ -1835,25 +1835,6 @@ class CurSir(QObject):
         if auto:
             # act on its own after a beat so the glow is visible (Esc cancels)
             QTimer.singleShot(1000, self._click_and_next)
-
-    def _friendly_error(self, err):
-        e = (err or "").lower()
-        if any(k in e for k in ("429", "quota", "rate", "resource_exhausted",
-                                "exhausted")):
-            return ("Your Gemini rate limit or quota is reached, sir. Please "
-                    "wait a moment, or check your API usage/quota.")
-        if any(k in e for k in ("403", "permission", "api key", "api_key",
-                                "unauthor", "invalid key", "401")):
-            return ("There's a problem with your API key, sir — please check "
-                    "it in Settings.")
-        if "400" in e:
-            return "Gemini rejected the request, sir. Shall we try again?"
-        if any(k in e for k in ("timed out", "timeout", "urlopen", "getaddr",
-                                "connection", "resolve", "network", "ssl")):
-            return ("I couldn't reach Gemini, sir — please check your "
-                    "internet connection.")
-        return ("My apologies, sir — I received no reply. Shall we try "
-                "again?")
 
     def _map(self, nx, ny):
         g = self._geom
