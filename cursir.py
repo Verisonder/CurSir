@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -499,7 +499,7 @@ class Glow(QWidget):
         wid = max(x for x, _ in pts)
         hei = max(y for _, y in pts)
         ox = self._pt.x() - wid / 2.0
-        oy = self._pt.y() - hei / 2.0
+        oy = self._pt.y() - hei / 2.0 - 5    # nudge up so it centres in ring
         poly = QPolygon([QPoint(round(ox + x), round(oy + y))
                          for x, y in pts])
         halo = int(120 + 80 * (1 + math.sin(self._phase)) / 2)   # breathe
