@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "0.3.9"
+VERSION = "0.4.0"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -1307,7 +1307,8 @@ class Settings(QWidget):
 class CurSir(QObject):
     # thread-safe hand-offs from worker threads back to the UI thread
     _sig_update_found = Signal(str)
-    _sig_update_done = Signal(bool, str)
+    _sig_update_done = Signal(str, str)      # (status, latest)
+    _sig_update_status = Signal(str)
 
     def __init__(self, cfg):
         super().__init__()
@@ -1318,13 +1319,15 @@ class CurSir(QObject):
         self.vision = Vision()
         self.settings = Settings(self)
         self._sig_update_found.connect(self._present_update)
-        self._sig_update_done.connect(self._after_update)
+        self._sig_update_done.connect(self._on_update_done)
+        self._sig_update_status.connect(self.settings.set_install_status)
 
         self.task = ""
         self.done_list = []
         self.target = None
         self.busy = False
         self._updating = False
+        self._install_active = False
         self._pending_update = None
         self._acting = False
         self._pending_launch = ""
@@ -1471,74 +1474,87 @@ class CurSir(QObject):
         if self._pending_update:
             self.offer_update(self._pending_update)
 
+    _VERIFY_MAX = 10           # ~10 tries x 4s = up to ~40s of waiting
+    _INSTALL_TIMEOUT_MS = 75000    # hard watchdog: give up after ~75s
+
     def offer_update(self, latest):
         if self._updating:
             return
         self._updating = True
-        log(f"offer_update: installing v{latest} (frozen={getattr(sys,'frozen',False)})")
+        self._install_active = True
+        log(f"offer_update: installing v{latest} "
+            f"(frozen={getattr(sys,'frozen',False)})")
         self.tray.showMessage("CurSir", f"Installing v{latest}, sir…")
         self.settings.begin_install()
-
-        if getattr(sys, "frozen", False):
-            # frozen .exe: 47MB download — keep it off the UI thread
-            self._prog = 0
-            self._prog_timer = QTimer(self)
-            self._prog_timer.timeout.connect(self._tick_progress)
-            self._prog_timer.start(40)
-            import threading
-
-            def work():
-                ok = apply_exe_update()
-                self._sig_update_done.emit(ok, latest)
-
-            threading.Thread(target=work, daemon=True).start()
-            return
-
-        # source bundle: VERIFY the new code is fully uploaded before we
-        # touch anything (retry a few times if it hasn't propagated yet),
-        # then swap. Avoids grabbing a half-uploaded file and breaking.
-        self._verify_tries = 0
-        self.settings.set_progress(12)
         self.settings.set_install_status("Verifying the update is ready, sir…")
-        QTimer.singleShot(0, lambda: self._verify_and_install(latest))
+        self._prog = 0
+        self._prog_timer = QTimer(self)
+        self._prog_timer.timeout.connect(self._tick_progress)
+        self._prog_timer.start(120)
+        # WATCHDOG — the download runs on a worker thread, so the UI event
+        # loop stays free and THIS timer can actually fire if things stall.
+        QTimer.singleShot(self._INSTALL_TIMEOUT_MS,
+                          lambda: self._install_watchdog(latest))
+        import threading
+        threading.Thread(target=lambda: self._install_worker(latest),
+                         daemon=True).start()
 
-    _VERIFY_MAX = 10           # ~10 tries x 4s = up to ~40s of waiting
-
-    def _verify_and_install(self, latest):
-        status, data = fetch_source(latest)
-        if status == "ok":
-            self.settings.set_progress(70)
-            QApplication.processEvents()
-            ok = write_source(data)
-            self.settings.set_progress(95)
-            self._finish_update("ok" if ok else "fail", latest)
+    def _install_worker(self, latest):
+        """Runs off the UI thread. Verifies + applies, reporting via signals."""
+        import time as _t
+        if getattr(sys, "frozen", False):
+            ok = apply_exe_update()
+            self._sig_update_done.emit("ok" if ok else "fail", latest)
             return
-        if status == "fail":
-            self._finish_update("fail", latest)
-            return
-        # not fully uploaded yet — wait and re-check
-        self._verify_tries += 1
-        if self._verify_tries >= self._VERIFY_MAX:
-            self._finish_update("stale", latest)
-            return
-        self.settings.set_progress(min(60, 12 + self._verify_tries * 5))
-        self.settings.set_install_status(
-            "Waiting for the update to finish uploading, sir… "
-            f"({self._verify_tries})")
-        QTimer.singleShot(4000, lambda: self._verify_and_install(latest))
+        for i in range(self._VERIFY_MAX):
+            if not self._install_active:      # watchdog gave up already
+                return
+            status, data = fetch_source(latest)
+            if status == "ok":
+                ok = write_source(data)
+                self._sig_update_done.emit("ok" if ok else "fail", latest)
+                return
+            if status == "fail":
+                self._sig_update_done.emit("fail", latest)
+                return
+            self._sig_update_status.emit(
+                "Waiting for the update to finish uploading, sir… "
+                f"({i + 1})")
+            _t.sleep(4)
+        self._sig_update_done.emit("stale", latest)
 
     def _tick_progress(self):
         if self._prog < 90:
-            self._prog += 3
+            self._prog += 2
             self.settings.set_progress(self._prog)
 
-    def _after_update(self, ok, latest):
-        # frozen (exe) path arrives here via signal with a bool
+    def _on_update_done(self, status, latest):
+        if not self._install_active:          # watchdog already aborted
+            return
+        self._install_active = False
         try:
             self._prog_timer.stop()
         except Exception:
             pass
-        self._finish_update("ok" if ok else "fail", latest)
+        self._finish_update(status, latest)
+
+    def _install_watchdog(self, latest):
+        if not self._install_active:          # already finished normally
+            return
+        # took too long — stop cleanly instead of hanging forever
+        self._install_active = False
+        self._updating = False
+        log("install watchdog: timed out — stopping")
+        try:
+            self._prog_timer.stop()
+        except Exception:
+            pass
+        self.settings.end_install(False)
+        self.settings.set_install_status(
+            "The update took too long, sir — stopped. Please try again.")
+        self.settings.show_update(latest)     # keep the Install button
+        self.tray.showMessage(
+            "CurSir", "Update took too long — stopped. Try again, sir.")
 
     def _finish_update(self, status, latest):
         log(f"finish_update: status={status}")
@@ -1548,7 +1564,6 @@ class CurSir(QObject):
             self.settings.set_install_status("Installed — restarting CurSir…")
             QTimer.singleShot(1100, self._do_restart)
         elif status == "stale":
-            # VERSION bumped but the new code hasn't propagated yet
             self._updating = False
             self.settings.end_install(False)
             self.settings.set_install_status(
