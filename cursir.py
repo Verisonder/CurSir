@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
