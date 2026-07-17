@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Rounded Squircle Background -->
+  <rect width="512" height="512" rx="128" fill="#1e1e2e"/>
+  
+  <!-- The "Sir" Top Hat Accent -->
+  <path d="M230 150 L310 150 L310 190 L330 190 L330 205 L210 205 L210 190 L230 190 Z" fill="#f5e0dc" />
+  <rect x="230" y="180" width="80" height="10" fill="#f38ba8" />
+
+  <!-- Sharp, Modern Cursor -->
+  <path d="M180 160 L360 280 L270 300 L220 390 Z" fill="#cba6f7" stroke="#1e1e2e" stroke-width="8" stroke-linejoin="round"/>
+</svg>
