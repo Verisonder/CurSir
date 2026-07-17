@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLineEdit, QLabel,
                                QSystemTrayIcon, QMenu, QProgressBar)
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 DEBUG = os.environ.get("CURSIR_DEBUG", "1") not in ("0", "", "false", "False")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.log")
 
@@ -57,6 +57,29 @@ def log(msg):
     except Exception:
         pass
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".cursir.json")
+
+
+def refresh_shell_icons():
+    """Flush the Windows shell icon cache so shortcut (.lnk) icons pick up a
+    changed cursir.ico. The shortcut points at the same {app}\\cursir.ico path,
+    so after self-update overwrites that file the shell still shows the stale
+    cached thumbnail until it's told to re-read. Tray/window icons are drawn
+    live from QIcon and don't need this."""
+    if platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+        # SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+        log("icon cache: shell notified")
+    except Exception as e:
+        log(f"icon cache: SHChangeNotify skipped ({e})")
+    try:
+        # belt-and-braces: rebuild the icon cache (no console flash)
+        subprocess.run(["ie4uinit.exe", "-show"], timeout=10,
+                       creationflags=0x08000000)  # CREATE_NO_WINDOW
+    except Exception:
+        pass
 ACCENT = "#379ED6"
 REPO_URL = "https://github.com/Verisonder/CurSir"
 RAW_VERSION_URL = \
@@ -172,6 +195,7 @@ def apply_source_update():
                 with open(icop, "wb") as f:
                     f.write(idata)
             log("update: icon refreshed")
+            refresh_shell_icons()
         except Exception as e:
             log(f"update: icon refresh skipped ({e})")
         log("update: SUCCESS")
@@ -369,6 +393,7 @@ def write_source(data):
                 icop = os.path.join(os.path.dirname(here), "cursir.ico")
                 with open(icop, "wb") as f:
                     f.write(idata)
+                refresh_shell_icons()
         except Exception:
             pass
         return True
