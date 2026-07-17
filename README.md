@@ -158,4 +158,24 @@ Pushing a `v*` tag triggers the GitHub Actions workflow (`.github/workflows/buil
 
 ---
 
+## Using this project / credit 📜
+
+CurSir is open source under **Apache-2.0**, and it's the original work of
+**Verisonder**. You're very welcome to use it, learn from it, and build on it —
+with three simple, legally-binding conditions (see `LICENSE` and `NOTICE`):
+
+- ✅ **Keep the credit** — leave the copyright and `NOTICE` in place
+- 🚫 **Don't claim it as your own** — don't pass CurSir off as something you
+  created; if you build on it, say it's based on CurSir by Verisonder
+- 🚫 **Don't imply endorsement** — the *CurSir* name, its icon, and the butler
+  persona are the author's; name them only to credit the origin
+
+Want to do something beyond that? Just ask first.
+
+## License
+
+Apache License 2.0 — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). Free to use with attribution; you may not claim it as your own or imply the author's endorsement.
+
+---
+
 <p align="center"><sub>Accent <code>#379ED6</code> &middot; a Verisonder project</sub></p>
